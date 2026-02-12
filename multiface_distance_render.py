@@ -14,6 +14,7 @@ import cv2
 import imageio
 from pathlib import Path
 from tqdm import tqdm
+from collections import deque
 import subprocess
 import os
 
@@ -120,15 +121,360 @@ def draw_line_graph(frame, x, y, width, height, data_points, title, show_value=F
     return frame
 
 
-def draw_facial_landmarks(frame, landmarks_df, timestamp, face_idx=0):
+def frontalize_mouth_landmarks(points_3d):
     """
-    Draw facial landmarks on the frame
+    Frontalize mouth landmark points by estimating and removing head rotation.
+    
+    Uses stable facial landmarks (eyes, nose bridge, chin) to compute the 3D
+    orientation of the face, then applies the inverse rotation to mouth points
+    to produce a frontal-view representation of the mouth shape.
+    
+    Approach (Direct 3D Geometry):
+        1. Compute the face coordinate frame from stable (non-deformable) landmarks:
+           - X-axis: left eye center → right eye center (horizontal)
+           - Y-axis: orthogonalized chin → nose bridge direction (vertical)
+           - Z-axis: face normal = cross(X, Y_approx), pointing toward camera
+        2. Build rotation matrix R_face = [x_axis | y_axis | z_axis]
+        3. Apply R_face^T (inverse rotation) to centered mouth points to "de-rotate" them
+        4. Restore the original centroid position so the points stay near the face in the image
+    
+    This preserves the actual mouth expression (open/closed/asymmetric) while removing
+    the geometric distortion caused by head rotation (yaw/pitch/roll).
+    
+    Args:
+        points_3d: dict {pt_idx: (x, y, z)} for all available facial landmarks.
+                   Must contain at least: 8 (chin), 27 (nose bridge top),
+                   36, 39 (right eye corners), 42, 45 (left eye corners),
+                   and all mouth points 48-67.
+    
+    Returns:
+        dict {pt_idx: (x_frontal, y_frontal)} for mouth landmarks (48-67),
+        or None if required landmarks are missing.
+    """
+    # Required stable reference points for face frame estimation
+    required_stable = [8, 27, 36, 39, 42, 45]
+    mouth_indices = list(range(48, 68))
+    
+    for idx in required_stable + mouth_indices:
+        if idx not in points_3d:
+            return None
+    
+    # Convert to numpy arrays
+    p = {k: np.array(v, dtype=np.float64) for k, v in points_3d.items()}
+    
+    # --- Step 1: Compute face coordinate frame from stable landmarks ---
+    
+    # Eye centers (structurally rigid - not affected by expression)
+    # 68-point model: 36-41 = right eye, 42-47 = left eye (from subject's perspective)
+    # In image space: points 36,39 = lower x (image-left), points 42,45 = higher x (image-right)
+    left_eye_center = (p[36] + p[39]) / 2.0
+    right_eye_center = (p[42] + p[45]) / 2.0
+    
+    # X-axis: horizontal direction of the face (left to right in image)
+    x_axis = right_eye_center - left_eye_center
+    x_norm = np.linalg.norm(x_axis)
+    if x_norm < 1e-8:
+        return None
+    x_axis = x_axis / x_norm
+    
+    # Approximate Y-axis: vertical direction (nose bridge top → chin, downward in image)
+    y_approx = p[8] - p[27]
+    
+    # Z-axis: face normal via cross product (points toward camera for frontal face)
+    z_axis = np.cross(x_axis, y_approx)
+    z_norm = np.linalg.norm(z_axis)
+    if z_norm < 1e-8:
+        return None
+    z_axis = z_axis / z_norm
+    
+    # Re-orthogonalize Y-axis to ensure a proper orthonormal frame
+    y_axis = np.cross(z_axis, x_axis)
+    y_axis = y_axis / np.linalg.norm(y_axis)
+    
+    # --- Step 2: Build rotation matrix ---
+    # R_face columns = face frame axes in the CSV coordinate system
+    # R_face transforms from canonical (frontal) frame → current face frame
+    R_face = np.column_stack([x_axis, y_axis, z_axis])
+    
+    # Inverse rotation: R_face^T transforms face frame → canonical (frontal) frame
+    R_inv = R_face.T
+    
+    # --- Step 3: De-rotate mouth points ---
+    mouth_3d = np.array([list(points_3d[i]) for i in mouth_indices], dtype=np.float64)
+    
+    # Center around the mouth centroid (rotation must be about a local center)
+    centroid = mouth_3d.mean(axis=0)
+    mouth_centered = mouth_3d - centroid
+    
+    # Apply inverse rotation to remove head pose
+    mouth_derotated = (R_inv @ mouth_centered.T).T
+    
+    # Restore position: place frontalized points at the original centroid (x, y)
+    mouth_frontalized = mouth_derotated + centroid
+    
+    result = {}
+    for i, idx in enumerate(mouth_indices):
+        result[idx] = (int(round(mouth_frontalized[i, 0])), int(round(mouth_frontalized[i, 1])))
+    
+    return result
+
+
+def frontalize_mouth_solvepnp(points_2d, points_z, frame_width, frame_height):
+    """
+    Alternative frontalization approach using cv2.solvePnP.
+    
+    Uses a canonical 3D face model and the detected 2D landmarks to estimate
+    the head pose via the Perspective-n-Point algorithm, then de-rotates the
+    mouth points in 3D camera space and re-projects them to 2D.
+    
+    Approach (solvePnP-based):
+        1. Define a canonical 3D face model (6 reference points in mm)
+        2. solvePnP matches detected 2D points to the canonical model → rvec, tvec
+        3. Convert mouth 2D points to approximate 3D camera coordinates using z-depth
+        4. Apply R^(-1) to the centered 3D mouth points to remove head rotation
+        5. Re-project the de-rotated 3D points to 2D image coordinates
+    
+    Args:
+        points_2d: dict {pt_idx: (x, y)} for all available landmarks (2D image coords)
+        points_z: dict {pt_idx: z_value} for corresponding z-depth values from 3DDFA
+        frame_width: width of the video frame in pixels
+        frame_height: height of the video frame in pixels
+    
+    Returns:
+        dict {pt_idx: (x_frontal, y_frontal)} for mouth landmarks (48-67),
+        or None if pose estimation fails.
+    """
+    # Canonical 3D face model reference points (in mm, nose tip as origin)
+    # Widely used with the 68-point iBUG landmark model
+    # Reference: https://learnopencv.com/head-pose-estimation-using-opencv-and-dlib/
+    canonical_model = {
+        30: np.array([0.0, 0.0, 0.0]),             # Nose tip
+        8:  np.array([0.0, -330.0, -65.0]),         # Chin
+        36: np.array([-225.0, 170.0, -135.0]),      # Left eye outer corner
+        45: np.array([225.0, 170.0, -135.0]),       # Right eye outer corner
+        48: np.array([-150.0, -150.0, -125.0]),     # Left mouth corner
+        54: np.array([150.0, -150.0, -125.0]),      # Right mouth corner
+    }
+    
+    pose_indices = list(canonical_model.keys())
+    mouth_indices = list(range(48, 68))
+    
+    # Verify required points exist
+    for idx in pose_indices + mouth_indices:
+        if idx not in points_2d:
+            return None
+    
+    # Prepare arrays for solvePnP
+    model_points = np.array([canonical_model[i] for i in pose_indices], dtype=np.float64)
+    image_points = np.array([[points_2d[i][0], points_2d[i][1]] for i in pose_indices], dtype=np.float64)
+    
+    # Approximate camera intrinsics (pinhole model)
+    focal_length = float(frame_width)
+    cx, cy = frame_width / 2.0, frame_height / 2.0
+    camera_matrix = np.array([
+        [focal_length, 0, cx],
+        [0, focal_length, cy],
+        [0, 0, 1]
+    ], dtype=np.float64)
+    dist_coeffs = np.zeros((4, 1))
+    
+    # Estimate head pose
+    success, rvec, tvec = cv2.solvePnP(
+        model_points, image_points, camera_matrix, dist_coeffs,
+        flags=cv2.SOLVEPNP_ITERATIVE
+    )
+    if not success:
+        return None
+    
+    # Get rotation matrix from rotation vector
+    R, _ = cv2.Rodrigues(rvec)
+    
+    # --- Frontalize mouth points using their 3D positions ---
+    # Construct approximate 3D coordinates for mouth points
+    # using (u, v) pixel coords and z-depth from the CSV
+    mouth_3d = np.array([
+        [points_2d[i][0], points_2d[i][1], points_z[i]]
+        for i in mouth_indices
+    ], dtype=np.float64)
+    
+    # Center around mouth centroid
+    centroid = mouth_3d.mean(axis=0)
+    mouth_centered = mouth_3d - centroid
+    
+    # De-rotate using the inverse of the solvePnP rotation
+    mouth_derotated = (R.T @ mouth_centered.T).T
+    
+    # Restore position
+    mouth_frontalized = mouth_derotated + centroid
+    
+    result = {}
+    for i, idx in enumerate(mouth_indices):
+        result[idx] = (int(round(mouth_frontalized[i, 0])), int(round(mouth_frontalized[i, 1])))
+    
+    return result
+
+
+def compute_mouth_aspect_ratio(mouth_points):
+    """
+    Compute the Mouth Aspect Ratio (MAR) from frontalized inner mouth landmarks.
+    
+    MAR measures how open the mouth is, analogous to EAR (Eye Aspect Ratio).
+    Uses inner mouth landmarks (60-67) to compute the ratio of vertical opening
+    to horizontal width.
+    
+    Inner mouth landmarks (68-point model):
+        60: left corner, 61: upper-left, 62: upper-center, 63: upper-right,
+        64: right corner, 65: lower-right, 66: lower-center, 67: lower-left
+    
+    Formula:
+        MAR = (|p61-p67| + |p62-p66| + |p63-p65|) / (2 * |p60-p64|)
+    
+    Args:
+        mouth_points: dict {pt_idx: (x, y)} containing at least inner mouth points 60-67
+    
+    Returns:
+        float: Mouth Aspect Ratio (0 = fully closed, higher = more open),
+        or None if required points are missing.
+    """
+    inner_indices = list(range(60, 68))
+    for idx in inner_indices:
+        if idx not in mouth_points:
+            return None
+    
+    p = {k: np.array(v, dtype=np.float64) for k, v in mouth_points.items() if k in inner_indices}
+    
+    # Vertical distances (3 pairs: top-bottom)
+    d1 = np.linalg.norm(p[61] - p[67])  # upper-left  ↔ lower-left
+    d2 = np.linalg.norm(p[62] - p[66])  # upper-center ↔ lower-center
+    d3 = np.linalg.norm(p[63] - p[65])  # upper-right ↔ lower-right
+    
+    # Horizontal distance (mouth width)
+    d_horiz = np.linalg.norm(p[60] - p[64])  # left corner ↔ right corner
+    
+    if d_horiz < 1e-8:
+        return None
+    
+    mar = (d1 + d2 + d3) / (2.0 * d_horiz)
+    return mar
+
+
+class VisualVADDetector:
+    """
+    Visual Voice Activity Detector (V-VAD) based on frontalized mouth landmarks.
+    
+    Detects whether a speaker is actively talking by analyzing the dynamics of the
+    Mouth Aspect Ratio (MAR) over a sliding time window. Since landmarks are
+    frontalized (head rotation removed), all MAR changes correspond to actual
+    facial muscle movement rather than head pose changes.
+    
+    Detection logic:
+        - Speaking produces rhythmic mouth opening/closing → high MAR variance
+        - Silence keeps mouth relatively still → low MAR variance
+        - A combined metric of MAR variance + MAR peak level avoids false positives
+          from static open mouths (yawning ≠ speaking)
+    
+    Hysteresis (hold-time):
+        Once the detector transitions to ACTIVE (speaking), it will maintain that
+        state for at least `hold_seconds` even if the MAR signal temporarily drops
+        (e.g. between syllables, during plosive consonants where mouth closes briefly).
+        This prevents rapid flickering between active/inactive states during continuous
+        speech. The hold timer resets each time the raw signal confirms speech, so
+        during actual speech the green state is sustained continuously.
+    
+    Args:
+        window_seconds: Length of the sliding analysis window in seconds (default: 0.5)
+        fps: Video frame rate, used to convert window to frame count
+        var_threshold: MAR variance threshold above which speech is detected (default: 0.001)
+        mar_activity_threshold: Minimum MAR mean to consider as potential speech (default: 0.15)
+        hold_seconds: Minimum time to sustain ACTIVE state after last detection (default: 0.6)
+    """
+    
+    def __init__(self, window_seconds=0.5, fps=30.0, var_threshold=0.001,
+                 mar_activity_threshold=0.15, hold_seconds=0.6):
+        self.window_size = max(3, int(window_seconds * fps))
+        self.var_threshold = var_threshold
+        self.mar_activity_threshold = mar_activity_threshold
+        self.hold_frames = max(1, int(hold_seconds * fps))
+        # Per-face MAR history: {face_idx: deque([mar_values])}
+        self._history = {}
+        # Per-face hold countdown: {face_idx: int} — frames remaining in hold
+        self._hold_counter = {}
+    
+    def update(self, face_idx, mar_value):
+        """
+        Add a new MAR observation for a face and return the activity state.
+        
+        Uses hysteresis: once speaking is detected, the ACTIVE state is held for
+        at least `hold_frames` even if the signal drops momentarily. Each new
+        positive detection resets the hold timer.
+        
+        Args:
+            face_idx: Index of the face
+            mar_value: Current Mouth Aspect Ratio (float), or None if unavailable
+        
+        Returns:
+            bool: True if the speaker is detected as active (speaking), False otherwise.
+        """
+        if face_idx not in self._history:
+            self._history[face_idx] = deque(maxlen=self.window_size)
+            self._hold_counter[face_idx] = 0
+        
+        if mar_value is not None:
+            self._history[face_idx].append(mar_value)
+        
+        history = self._history[face_idx]
+        
+        # Raw detection from MAR signal
+        raw_speaking = False
+        if len(history) >= 3:
+            values = np.array(history)
+            mar_var = np.var(values)
+            mar_mean = np.mean(values)
+            
+            # Speaking = mouth is moving dynamically (high variance)
+            # AND mouth is at least partially open on average (not just micro-twitches)
+            raw_speaking = (mar_var > self.var_threshold) and (mar_mean > self.mar_activity_threshold)
+        
+        # Hysteresis logic
+        if raw_speaking:
+            # Speech detected → reset hold timer to full duration
+            self._hold_counter[face_idx] = self.hold_frames
+        else:
+            # No speech detected → decrement hold timer
+            if self._hold_counter[face_idx] > 0:
+                self._hold_counter[face_idx] -= 1
+        
+        # Active as long as hold timer hasn't expired
+        return self._hold_counter[face_idx] > 0
+    
+    def reset(self, face_idx=None):
+        """Clear history for a specific face or all faces."""
+        if face_idx is not None:
+            self._history.pop(face_idx, None)
+            self._hold_counter.pop(face_idx, None)
+        else:
+            self._history.clear()
+            self._hold_counter.clear()
+
+
+def draw_facial_landmarks(frame, landmarks_df, timestamp, face_idx=0,
+                          frontalize=True, vvad_detector=None):
+    """
+    Draw facial landmarks on the frame with Visual VAD coloring.
+    
+    Color scheme:
+        - White:  original (raw) mouth landmark positions
+        - Red:    frontalized mouth landmarks — speaker INACTIVE (not speaking)
+        - Green:  frontalized mouth landmarks — speaker ACTIVE (speaking)
     
     Args:
         frame: Video frame (BGR format)
         landmarks_df: DataFrame with landmark data (columns: seconds, face_idx, point_type, x, y, z)
         timestamp: Current frame timestamp
         face_idx: Index of the face to draw landmarks for
+        frontalize: If True, apply frontalization to mouth landmarks
+        vvad_detector: VisualVADDetector instance for speech activity detection.
+                       If None, frontalized points default to green.
     
     Returns:
         Modified frame
@@ -154,50 +500,46 @@ def draw_facial_landmarks(frame, landmarks_df, timestamp, face_idx=0):
     if frame_landmarks.empty:
         return frame
     
-    # Convert landmarks to dictionary for easy access
-    points = {}
+    # Convert landmarks to dictionaries (2D for drawing, 3D for frontalization)
+    points_2d = {}
+    points_3d = {}
     for _, row in frame_landmarks.iterrows():
         pt_idx = int(row['point_type'])
-        points[pt_idx] = (int(row['x']), int(row['y']))
+        points_2d[pt_idx] = (int(row['x']), int(row['y']))
+        points_3d[pt_idx] = (float(row['x']), float(row['y']), float(row['z']))
     
-    # Define connections between landmarks (68-point facial landmark model)
-    connections = [
-        # Jaw line: 0-16
-        list(zip(range(0, 16), range(1, 17))),
-        # Right eyebrow: 17-21
-        list(zip(range(17, 21), range(18, 22))),
-        # Left eyebrow: 22-26
-        list(zip(range(22, 26), range(23, 27))),
-        # Nose bridge: 27-30
-        list(zip(range(27, 30), range(28, 31))),
-        # Nose bottom: 31-35
-        list(zip(range(31, 35), range(32, 36))),
-        # Right eye: 36-41 (loop)
-        list(zip(range(36, 41), range(37, 42))) + [(41, 36)],
-        # Left eye: 42-47 (loop)
-        list(zip(range(42, 47), range(43, 48))) + [(47, 42)],
-        # Outer mouth: 48-59 (loop)
-        list(zip(range(48, 59), range(49, 60))) + [(59, 48)],
-        # Inner mouth: 60-67 (loop)
-        list(zip(range(60, 67), range(61, 68))) + [(67, 60)],
-    ]
+    mouth_indices = set(range(48, 68))
     
-    # Draw connecting lines first (so points appear on top)
-    line_color = (255, 255, 255)  # White
-    line_thickness = 1
+    # --- Frontalization ---
+    frontalized_points = None
+    if frontalize:
+        frontalized_points = frontalize_mouth_landmarks(points_3d)
     
-    for connection_group in connections:
-        for pt1_idx, pt2_idx in connection_group:
-            if pt1_idx in points and pt2_idx in points:
-                cv2.line(frame, points[pt1_idx], points[pt2_idx], line_color, line_thickness, cv2.LINE_AA)
+    # --- Visual VAD: determine if speaker is active ---
+    is_speaking = False
+    if frontalized_points and vvad_detector is not None:
+        mar = compute_mouth_aspect_ratio(frontalized_points)
+        is_speaking = vvad_detector.update(face_idx, mar)
     
-    # Draw landmark points
-    point_color = (255, 255, 255)  # White
+    # --- Drawing ---
     point_radius = 2
     point_thickness = -1  # Filled
     
-    for pt_idx, pt_coord in points.items():
-        cv2.circle(frame, pt_coord, point_radius, point_color, point_thickness, cv2.LINE_AA)
+    # # 1) Original (raw) mouth landmarks — always White
+    # original_color = (255, 255, 255)  # White (BGR)
+    # for pt_idx, pt_coord in points_2d.items():
+    #     if pt_idx in mouth_indices:
+    #         cv2.circle(frame, pt_coord, point_radius, original_color, point_thickness, cv2.LINE_AA)
+    
+    # 2) Frontalized mouth landmarks — Green if speaking, Red if inactive
+    if frontalized_points:
+        if is_speaking:
+            frontal_color = (0, 255, 0)    # Green (BGR) — ACTIVE
+        else:
+            frontal_color = (0, 0, 255)    # Red (BGR)   — INACTIVE
+        
+        for pt_idx, pt_coord in frontalized_points.items():
+            cv2.circle(frame, pt_coord, point_radius, frontal_color, point_thickness, cv2.LINE_AA)
     
     return frame
 
@@ -664,13 +1006,13 @@ def draw_face_boxes(frame, face_data, timestamp):
             y = int(face_subset['y'].values[0])
             
             # Draw circle marker
-            cv2.circle(frame, (x, y), 8, color, 2)
-            cv2.circle(frame, (x, y), 3, color, -1)
+            # cv2.circle(frame, (x, y), 8, color, 2)
+            # cv2.circle(frame, (x, y), 3, color, -1)
             
             # Draw face label above marker
             label = f"F{int(face_idx)}"
             cv2.putText(frame, label, 
-                       (x - 15, y - 15),
+                       (x + 70, y - 20),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
     
     return frame
@@ -777,6 +1119,11 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
     )
     
     print("\nRendering annotated video...")
+    
+    # Initialize Visual VAD detector for mouth activity detection
+    vvad_detector = VisualVADDetector(window_seconds=0.5, fps=fps,
+                                      var_threshold=0.0005, mar_activity_threshold=0.12,
+                                      hold_seconds=1.0)
     
     # Store last valid audio data to persist after MQE data ends
     last_audio_data = None
@@ -910,10 +1257,13 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
         # Draw dashboard overlay
         frame_bgr = draw_dashboard(frame_bgr, frame_idx, face_count, face_distances, timestamp, audio_data, vad_data)
         
-        # Draw facial landmarks for all detected faces
+        # Draw facial landmarks for all detected faces (with V-VAD coloring)
         if show_markers and face_count > 0:
             for face_idx in range(face_count):
-                frame_bgr = draw_facial_landmarks(frame_bgr, df_mouth, timestamp, face_idx)
+                frame_bgr = draw_facial_landmarks(
+                    frame_bgr, df_mouth, timestamp, face_idx,
+                    frontalize=True, vvad_detector=vvad_detector
+                )
         
         # Convert back to RGB for imageio
         frame_rgb = frame_bgr[..., ::-1]
