@@ -10,6 +10,14 @@ facecount = import_csv_data(csv_file_directory + "face_count.csv", "face_count")
 faceposition = import_csv_data(csv_file_directory + "face_position.csv", "face_orientation");
 mouthposition = import_csv_data(csv_file_directory + "mouth_position.csv", "mouth_position");
 
+% Import VAD data, and create individual
+vadMichal = readtable('../dumps/vad.csv');
+vadMichal.vadDagcDecFinal(vadMichal.seconds > 10 & vadMichal.seconds < 16.8) = 0;
+vadMichal.vadDagcDecFinal(vadMichal.seconds > 25.8) = 0;
+
+vadMarek = readtable('../dumps/vad.csv');
+vadMarek.vadDagcDecFinal(vadMarek.seconds < 10) = 0;
+
 % Find all unique face indices in the data
 unique_face_indices = unique(faceposition.face_idx);
 num_faces = length(unique_face_indices);
