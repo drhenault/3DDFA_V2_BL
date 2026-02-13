@@ -367,11 +367,13 @@ class VisualVADDetector:
     frontalized (head rotation removed), all MAR changes correspond to actual
     facial muscle movement rather than head pose changes.
     
-    Detection logic:
-        - Speaking produces rhythmic mouth opening/closing → high MAR variance
-        - Silence keeps mouth relatively still → low MAR variance
-        - A combined metric of MAR variance + MAR peak level avoids false positives
-          from static open mouths (yawning ≠ speaking)
+    Detection logic (Delta-Enhanced with Zero-Crossing Rate):
+        1. MAR variance > var_threshold  — mouth is moving dynamically
+        2. MAR mean > mar_activity_threshold — mouth is at least partially open
+        3. ZCR of MAR derivative >= min_zcr — mouth oscillates rhythmically
+           (speech produces ~3-7 Hz open/close cycles, while idle open mouth
+            or slow head-movement artifacts have low ZCR)
+        All three conditions must be met simultaneously.
     
     Hysteresis (hold-time):
         Once the detector transitions to ACTIVE (speaking), it will maintain that
@@ -382,19 +384,21 @@ class VisualVADDetector:
         during actual speech the green state is sustained continuously.
     
     Args:
-        window_seconds: Length of the sliding analysis window in seconds (default: 0.5)
+        window_seconds: Length of the sliding analysis window in seconds (default: 0.3)
         fps: Video frame rate, used to convert window to frame count
-        var_threshold: MAR variance threshold above which speech is detected (default: 0.001)
-        mar_activity_threshold: Minimum MAR mean to consider as potential speech (default: 0.15)
-        hold_seconds: Minimum time to sustain ACTIVE state after last detection (default: 0.6)
+        var_threshold: MAR variance threshold (default: 0.005)
+        mar_activity_threshold: Minimum MAR mean for speech (default: 0.30)
+        hold_seconds: Minimum time to sustain ACTIVE state (default: 0.3)
+        min_zcr: Minimum zero-crossing rate of MAR derivative (default: 3)
     """
     
-    def __init__(self, window_seconds=0.5, fps=30.0, var_threshold=0.001,
-                 mar_activity_threshold=0.15, hold_seconds=0.6):
-        self.window_size = max(3, int(window_seconds * fps))
+    def __init__(self, window_seconds=0.3, fps=30.0, var_threshold=0.005,
+                 mar_activity_threshold=0.30, hold_seconds=0.3, min_zcr=3):
+        self.window_size = max(4, int(window_seconds * fps))
         self.var_threshold = var_threshold
         self.mar_activity_threshold = mar_activity_threshold
         self.hold_frames = max(1, int(hold_seconds * fps))
+        self.min_zcr = min_zcr
         # Per-face MAR history: {face_idx: deque([mar_values])}
         self._history = {}
         # Per-face hold countdown: {face_idx: int} — frames remaining in hold
@@ -424,16 +428,24 @@ class VisualVADDetector:
         
         history = self._history[face_idx]
         
-        # Raw detection from MAR signal
+        # Raw detection from MAR signal (delta-enhanced with ZCR)
         raw_speaking = False
-        if len(history) >= 3:
+        if len(history) >= 4:
             values = np.array(history)
             mar_var = np.var(values)
             mar_mean = np.mean(values)
             
-            # Speaking = mouth is moving dynamically (high variance)
-            # AND mouth is at least partially open on average (not just micro-twitches)
-            raw_speaking = (mar_var > self.var_threshold) and (mar_mean > self.mar_activity_threshold)
+            # Compute zero-crossing rate of MAR derivative
+            # Speech → rhythmic oscillation → high ZCR
+            # Idle open mouth → stable MAR → low ZCR
+            delta = np.diff(values)
+            signs = np.sign(delta)
+            zcr = int(np.sum(np.abs(np.diff(signs)) > 0))
+            
+            # All three conditions: variance + mean level + oscillation pattern
+            raw_speaking = ((mar_var > self.var_threshold)
+                            and (mar_mean > self.mar_activity_threshold)
+                            and (zcr >= self.min_zcr))
         
         # Hysteresis logic
         if raw_speaking:
@@ -1121,9 +1133,9 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
     print("\nRendering annotated video...")
     
     # Initialize Visual VAD detector for mouth activity detection
-    vvad_detector = VisualVADDetector(window_seconds=0.5, fps=fps,
-                                      var_threshold=0.0005, mar_activity_threshold=0.12,
-                                      hold_seconds=1.0)
+    vvad_detector = VisualVADDetector(window_seconds=0.3, fps=fps,
+                                      var_threshold=0.002, mar_activity_threshold=0.15,
+                                      hold_seconds=1.0, min_zcr=3)
     
     # Store last valid audio data to persist after MQE data ends
     last_audio_data = None
