@@ -387,7 +387,7 @@
     <div class="pipe-arrow">→</div>
     <div class="pipe-step yellow-border">📐 MAR<br><small>Mouth Aspect Ratio</small></div>
     <div class="pipe-arrow">→</div>
-    <div class="pipe-step green-border">🎤 V-VAD<br><small>active / inactive</small></div>
+    <div class="pipe-step green-border">🎤 V-VAD<br><small>P(speech) + active/inactive</small></div>
   </div>
 
   <div style="margin-top:35px;">
@@ -419,8 +419,8 @@
       <tr>
         <td><span class="green">V-VAD</span></td>
         <td>MAR time series</td>
-        <td>bool: speaking / silent</td>
-        <td><code>VisualVADDetector.update()</code><br><small style="color:var(--muted);">Var + Mean + ZCR + Hysteresis</small></td>
+        <td>P(speech) ∈ [0,1] + bool</td>
+        <td><code>VisualVADDetector.update()</code><br><small style="color:var(--muted);">Sigmoid(Var) × Sigmoid(Mean) × Sigmoid(ZCR) + Hysteresis</small></td>
       </tr>
     </table>
   </div>
@@ -808,7 +808,8 @@ right_eye = (<span class="var">p</span>[<span class="num">42</span>] + <span cla
       <p style="font-size:0.95em;">Detects <span class="highlight2">rhythmic oscillations</span> characteristic of speech (open-close-open-close).</p>
 
       <div class="formula" style="background: linear-gradient(135deg, #1a2e1a, #162116); border-color: var(--green); margin-top:20px;">
-        <span style="color:var(--green);">is_speaking</span> = (Var &gt; 0.002) <strong>AND</strong> (Mean &gt; 0.15) <strong>AND</strong> (ZCR ≥ 3)
+        <span style="color:var(--green);">P(speech)</span> = σ(Var) × σ(Mean) × σ(ZCR)<br>
+        <span style="font-size:0.7em; color:var(--muted);">binary: is_speaking = hysteresis( P(speech) )</span>
       </div>
     </div>
     <div class="col">
@@ -991,10 +992,75 @@ right_eye = (<span class="var">p</span>[<span class="num">42</span>] + <span cla
 </div>
 
 <!-- ============================================================ -->
-<!-- SLIDE 15: COLOR SCHEME -->
+<!-- SLIDE 15: SPEECH PROBABILITY -->
 <!-- ============================================================ -->
 <div class="slide" id="slide-15">
-  <h1>12. Color Scheme — Video Visualization</h1>
+  <h1>12. Speech Probability — Continuous Confidence Score</h1>
+  <div class="columns">
+    <div class="col">
+      <h2>From Binary to Continuous</h2>
+      <p>Instead of only a <span class="red">binary</span> active/inactive decision, V-VAD now also outputs a <span class="highlight">continuous probability</span> P(speech) ∈ [0, 1].</p>
+
+      <h2 style="margin-top:20px;">Sigmoid Normalization</h2>
+      <p>Each feature is normalized relative to its threshold using a <span class="highlight2">sigmoid function</span>:</p>
+
+      <div class="formula-small">
+        σ(x, c, k) = 1 / (1 + e<sup>−k·(x/c − 1)</sup>)
+      </div>
+
+      <p style="font-size:0.95em; margin-top:10px;">Properties:</p>
+      <ul>
+        <li>At the threshold (x = c): <span class="yellow">σ = 0.5</span></li>
+        <li>Well above threshold: σ → 1.0</li>
+        <li>Well below threshold: σ → 0.0</li>
+        <li>Steepness <span class="yellow">k = 4</span> gives a smooth but decisive transition</li>
+      </ul>
+
+      <h2 style="margin-top:20px;">Combined Probability</h2>
+      <div class="formula" style="background: linear-gradient(135deg, #1a2e1a, #162116); border-color: var(--green);">
+        P(speech) = σ(Var/thr) × σ(MAR/thr) × σ(ZCR/thr)
+      </div>
+      <p style="font-size:0.95em;">Multiplicative combination — <span class="highlight">all features must contribute</span> for high probability. If any single feature is low, the probability drops.</p>
+    </div>
+    <div class="col">
+      <div class="code"><span class="cmt"># Sigmoid normalization (k=4)</span>
+<span class="kw">def</span> <span class="fn">_sigmoid</span>(x, center, k=<span class="num">4.0</span>):
+    z = k * (x - center)
+    <span class="kw">return</span> <span class="num">1.0</span> / (<span class="num">1.0</span> + np.<span class="fn">exp</span>(-z))
+
+<span class="cmt"># Per-feature scores (0.5 at threshold)</span>
+<span class="var">s_var</span> = <span class="fn">sigmoid</span>(mar_var / var_thr, <span class="num">1.0</span>)
+<span class="var">s_mar</span> = <span class="fn">sigmoid</span>(mar_mean / mar_thr, <span class="num">1.0</span>)
+<span class="var">s_zcr</span> = <span class="fn">sigmoid</span>(zcr / min_zcr, <span class="num">1.0</span>)
+
+<span class="cmt"># Combined probability</span>
+<span class="var">prob</span> = <span class="var">s_var</span> * <span class="var">s_mar</span> * <span class="var">s_zcr</span></div>
+
+      <h3 style="margin-top:20px;">Smoothed Probability</h3>
+      <p style="font-size:0.95em;">A <span class="highlight2">smoothed version</span> with exponential decay mirrors the hold-time behavior in the continuous domain:</p>
+
+      <div class="formula-small">
+        P<sub>smooth</sub>(t) = max( P<sub>raw</sub>(t), P<sub>smooth</sub>(t−1) · decay )
+      </div>
+
+      <div class="code" style="font-size:0.85em;"><span class="cmt"># Decay rate matches hold time</span>
+<span class="var">decay</span> = <span class="num">1.0</span> - (<span class="num">1.0</span> / hold_frames)
+
+<span class="cmt"># Per-frame update</span>
+<span class="var">smoothed</span> = <span class="fn">max</span>(<span class="var">prob</span>, <span class="var">prev_smoothed</span> * <span class="var">decay</span>)</div>
+
+      <div class="note" style="margin-top:15px;">
+        <strong>Use case:</strong> The probability curve enables <strong>threshold-free analysis</strong> on the dashboard — you can visually compare P(speech) against Audio VAD and choose optimal thresholds without re-running the algorithm.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 16: COLOR SCHEME -->
+<!-- ============================================================ -->
+<div class="slide" id="slide-16">
+  <h1>13. Color Scheme — Video Visualization</h1>
   <div class="columns">
     <div class="col" style="flex:1.2;">
       <h2>Three Layers of Information</h2>
@@ -1055,10 +1121,83 @@ right_eye = (<span class="var">p</span>[<span class="num">42</span>] + <span cla
 </div>
 
 <!-- ============================================================ -->
-<!-- SLIDE 16: PARAMETER TUNING & PERFORMANCE -->
+<!-- SLIDE 17: ENROLLMENT AUDIO GENERATION -->
 <!-- ============================================================ -->
-<div class="slide" id="slide-16">
-  <h1>13. Parameter Tuning & Performance Analysis</h1>
+<div class="slide" id="slide-17">
+  <h1>14. Enrollment Audio Generation</h1>
+  <div class="columns">
+    <div class="col">
+      <h2>Purpose</h2>
+      <p>Extract <span class="highlight">speech-only audio segments</span> from each recording for downstream tasks (speaker enrollment, verification, voice profiling).</p>
+
+      <h2 style="margin-top:20px;">Three VAD-Based Extraction Modes</h2>
+      <table>
+        <tr><th>Mode</th><th>Criterion</th><th>Output File</th></tr>
+        <tr>
+          <td><span class="highlight">Audio VAD</span></td>
+          <td>Audio energy-based VAD = active</td>
+          <td><code>{name}_audio_vad.wav</code></td>
+        </tr>
+        <tr>
+          <td><span class="highlight2">V-VAD</span></td>
+          <td>Visual VAD = active</td>
+          <td><code>{name}_vvad.wav</code></td>
+        </tr>
+        <tr>
+          <td><span class="green">Combined</span></td>
+          <td>Audio VAD <strong>OR</strong> V-VAD = active</td>
+          <td><code>{name}_audio_vvad.wav</code></td>
+        </tr>
+      </table>
+
+      <h2 style="margin-top:20px;">Processing Pipeline</h2>
+      <div class="pipeline">
+        <div class="pipe-step">📁 dumps_*/<br><small>.wav + .csv</small></div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-step accent2">🔍 Compute<br>V-VAD<br><small>frontalize + MAR</small></div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-step yellow-border">✂️ Segment<br><small>time → samples</small></div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-step green-border">🔗 Concat<br><small>enrollment/*.wav</small></div>
+      </div>
+    </div>
+    <div class="col">
+      <h2>Output Format</h2>
+      <div class="diagram">
+        <table>
+          <tr><td style="color:var(--muted); width:130px;">Sample Rate</td><td><span class="highlight">48,000 Hz</span></td></tr>
+          <tr><td style="color:var(--muted);">Bit Depth</td><td><span class="highlight">32-bit float</span> (PCM_F32LE)</td></tr>
+          <tr><td style="color:var(--muted);">Channels</td><td>Mono (1 ch)</td></tr>
+          <tr><td style="color:var(--muted);">Container</td><td>WAV</td></tr>
+        </table>
+      </div>
+
+      <h3 style="margin-top:15px;">Segmentation Logic</h3>
+      <div class="code" style="font-size:0.85em;"><span class="cmt"># Frame decisions → time segments</span>
+<span class="kw">for</span> each frame <span class="kw">at</span> time t:
+  <span class="kw">if</span> vad[t] == <span class="num">1</span> <span class="kw">and</span> <span class="kw">not</span> in_segment:
+    <span class="var">start</span> = t - dt/<span class="num">2</span>  <span class="cmt"># half-frame pad</span>
+  <span class="kw">if</span> vad[t] == <span class="num">0</span> <span class="kw">and</span> in_segment:
+    <span class="var">end</span> = t_prev + dt/<span class="num">2</span>
+    segments.<span class="fn">append</span>((<span class="var">start</span>, <span class="var">end</span>))
+
+<span class="cmt"># Extract & concatenate audio</span>
+<span class="kw">for</span> (s, e) <span class="kw">in</span> segments:
+  parts.<span class="fn">append</span>(audio[s*sr : e*sr])
+result = np.<span class="fn">concatenate</span>(parts)</div>
+
+      <div class="note" style="margin-top:15px;">
+        <strong>Why Combined (OR)?</strong> Audio VAD catches quiet speech that V-VAD misses, while V-VAD catches speech in noisy conditions where audio VAD fails. The union maximizes speech coverage for enrollment.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 18: PARAMETER TUNING & PERFORMANCE -->
+<!-- ============================================================ -->
+<div class="slide" id="slide-18">
+  <h1>15. Parameter Tuning & Performance Analysis</h1>
   <div class="columns">
     <div class="col">
       <h2>Tuning Methodology</h2>
@@ -1123,10 +1262,10 @@ right_eye = (<span class="var">p</span>[<span class="num">42</span>] + <span cla
 </div>
 
 <!-- ============================================================ -->
-<!-- SLIDE 17: LIMITATIONS & EDGE CASES -->
+<!-- SLIDE 19: LIMITATIONS & EDGE CASES -->
 <!-- ============================================================ -->
-<div class="slide" id="slide-17">
-  <h1>14. Known Limitations & Edge Cases</h1>
+<div class="slide" id="slide-19">
+  <h1>16. Known Limitations & Edge Cases</h1>
   <div class="columns">
     <div class="col">
       <h2>Challenging Scenarios</h2>
@@ -1212,10 +1351,10 @@ right_eye = (<span class="var">p</span>[<span class="num">42</span>] + <span cla
 </div>
 
 <!-- ============================================================ -->
-<!-- SLIDE 18: SUMMARY -->
+<!-- SLIDE 20: SUMMARY -->
 <!-- ============================================================ -->
-<div class="slide" id="slide-18">
-  <h1>15. Summary</h1>
+<div class="slide" id="slide-20">
+  <h1>17. Summary</h1>
   <div class="columns">
     <div class="col">
       <h2>Face Frontalization</h2>
@@ -1235,23 +1374,27 @@ right_eye = (<span class="var">p</span>[<span class="num">42</span>] + <span cla
       </ul>
     </div>
     <div class="col">
-      <h2>Visual VAD (ZCR-Enhanced)</h2>
+      <h2>Visual VAD (ZCR-Enhanced + Probability)</h2>
       <div class="pipeline" style="flex-direction:column; align-items:stretch; gap:8px;">
         <div class="pipe-step" style="width:100%;">1. Compute MAR from frontalized inner mouth pts</div>
-        <div class="pipe-step accent2" style="width:100%;">2. Analyze variance + mean MAR + ZCR in 0.3s window</div>
-        <div class="pipe-step yellow-border" style="width:100%;">3. Var &gt; 0.002 AND Mean &gt; 0.15 AND ZCR ≥ 3 → speech</div>
-        <div class="pipe-step green-border" style="width:100%;">4. Hysteresis (hold time 1.0s) stabilizes output</div>
+        <div class="pipe-step accent2" style="width:100%;">2. Sigmoid-normalize Var, Mean MAR, ZCR → P(speech)</div>
+        <div class="pipe-step yellow-border" style="width:100%;">3. Smooth probability with exponential decay</div>
+        <div class="pipe-step green-border" style="width:100%;">4. Hysteresis (hold 1.0s) → binary active/inactive</div>
       </div>
       
-      <h2 style="margin-top:25px;">Algorithm Parameters</h2>
-      <table>
+      <h2 style="margin-top:15px;">Algorithm Parameters</h2>
+      <table style="font-size:0.95em;">
         <tr><th>Parameter</th><th>Value</th><th>Effect of Increasing</th></tr>
         <tr><td>window_seconds</td><td>0.3s</td><td>Smoother signal, slower reaction</td></tr>
         <tr><td>var_threshold</td><td>0.002</td><td>Less sensitive (fewer FP)</td></tr>
-        <tr><td>mar_activity_threshold</td><td>0.15</td><td>Ignores quiet speech (fewer FP)</td></tr>
+        <tr><td>mar_threshold</td><td>0.15</td><td>Ignores quiet speech (fewer FP)</td></tr>
         <tr><td>min_zcr</td><td>3</td><td>Rejects non-rhythmic motion</td></tr>
         <tr><td>hold_seconds</td><td>1.0s</td><td>Bridges pauses (fewer FN)</td></tr>
+        <tr><td>sigmoid_k</td><td>4.0</td><td>Sharper probability transition</td></tr>
       </table>
+
+      <h2 style="margin-top:15px;">Enrollment Audio</h2>
+      <p style="font-size:0.95em;">3 WAV files per recording (48kHz, 32-bit float): Audio VAD only, V-VAD only, Combined (OR).</p>
     </div>
   </div>
 </div>
@@ -1260,7 +1403,7 @@ right_eye = (<span class="var">p</span>[<span class="num">42</span>] + <span cla
 <!-- NAVIGATION -->
 <!-- ============================================================ -->
 <div class="slide-counter">
-  <span id="current-slide">1</span> / <span id="total-slides">18</span>
+  <span id="current-slide">1</span> / <span id="total-slides">20</span>
 </div>
 
 <div class="nav">
