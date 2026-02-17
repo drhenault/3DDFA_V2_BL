@@ -89,6 +89,49 @@ NEW_PARAMS = {
 }
 
 
+def _sigmoid(x, center, k=4.0):
+    """Sigmoid function for soft thresholding. Returns 0.5 at x=center."""
+    z = k * (x - center)
+    # Clamp to avoid overflow in exp
+    z = max(-20.0, min(20.0, z))
+    return 1.0 / (1.0 + np.exp(-z))
+
+
+def _compute_speech_probability(var_value, mean_mar, params, zcr_value=None):
+    """
+    Compute continuous V-VAD speech probability [0, 1] from signal features.
+
+    Uses sigmoid normalization for each feature — 0.5 at the threshold,
+    smooth transition on both sides. The combined probability is the product
+    of individual scores, so all features must contribute for high probability.
+
+    For the OLD algorithm (no ZCR):  prob = s_var * s_mar
+    For the NEW algorithm (with ZCR): prob = s_var * s_mar * s_zcr
+
+    Args:
+        var_value:  MAR variance in the current window
+        mean_mar:   Mean MAR in the current window
+        params:     Algorithm parameter dict (thresholds)
+        zcr_value:  Zero-crossing rate (None for OLD algorithm)
+
+    Returns:
+        float: Speech probability in [0, 1]
+    """
+    vt = params['var_threshold']
+    mt = params['mar_activity_threshold']
+    k = 4.0  # steepness — gives smooth but decisive transition
+
+    # Normalize each feature relative to its threshold, then apply sigmoid
+    s_var = _sigmoid(var_value / vt, 1.0, k) if vt > 0 else 0.0
+    s_mar = _sigmoid(mean_mar / mt, 1.0, k) if mt > 0 else 0.0
+
+    if zcr_value is not None and 'min_zcr' in params and params['min_zcr'] > 0:
+        s_zcr = _sigmoid(zcr_value / params['min_zcr'], 1.0, k)
+        return float(s_var * s_mar * s_zcr)
+    else:
+        return float(s_var * s_mar)
+
+
 def run_old_vvad(frontal_mars, params):
     """Run OLD baseline V-VAD: var + mean threshold + hold."""
     fps = params['fps']
@@ -103,21 +146,32 @@ def run_old_vvad(frontal_mars, params):
     vvad_out = []
     var_out = []
     mean_out = []
+    prob_out = []
+    smoothed_prob_out = []
+
+    prev_smoothed = 0.0
+    decay = 1.0 - (1.0 / max(1, hf))  # decay matches hold time
 
     for m in frontal_mars:
         if m is not None:
             hist.append(m)
         active = False
+        mv = 0.0
+        mm = 0.0
         if len(hist) >= 3:
             v = np.array(hist)
             mv = float(np.var(v))
             mm = float(np.mean(v))
             active = (mv > vt) and (mm > mt)
-        else:
-            mv = 0.0
-            mm = 0.0
+
+        prob = _compute_speech_probability(mv, mm, params)
+        smoothed = max(prob, prev_smoothed * decay)
+        prev_smoothed = smoothed
+
         var_out.append(round(mv, 8))
         mean_out.append(round(mm, 6))
+        prob_out.append(round(prob, 4))
+        smoothed_prob_out.append(round(smoothed, 4))
         raw_out.append(1 if active else 0)
         if active:
             hc = hf
@@ -125,7 +179,7 @@ def run_old_vvad(frontal_mars, params):
             hc -= 1
         vvad_out.append(1 if hc > 0 else 0)
 
-    return raw_out, vvad_out, var_out, mean_out
+    return raw_out, vvad_out, var_out, mean_out, prob_out, smoothed_prob_out
 
 
 def run_new_vvad(frontal_mars, params):
@@ -144,12 +198,19 @@ def run_new_vvad(frontal_mars, params):
     var_out = []
     mean_out = []
     zcr_out = []
+    prob_out = []
+    smoothed_prob_out = []
+
+    prev_smoothed = 0.0
+    decay = 1.0 - (1.0 / max(1, hf))  # decay matches hold time
 
     for m in frontal_mars:
         if m is not None:
             hist.append(m)
         active = False
         zcr_val = 0
+        mv = 0.0
+        mm = 0.0
         if len(hist) >= 4:
             v = np.array(hist)
             mv = float(np.var(v))
@@ -158,12 +219,16 @@ def run_new_vvad(frontal_mars, params):
             signs = np.sign(delta)
             zcr_val = int(np.sum(np.abs(np.diff(signs)) > 0))
             active = (mv > vt) and (mm > mt) and (zcr_val >= min_zcr)
-        else:
-            mv = 0.0
-            mm = 0.0
+
+        prob = _compute_speech_probability(mv, mm, params, zcr_value=zcr_val)
+        smoothed = max(prob, prev_smoothed * decay)
+        prev_smoothed = smoothed
+
         var_out.append(round(mv, 8))
         mean_out.append(round(mm, 6))
         zcr_out.append(zcr_val)
+        prob_out.append(round(prob, 4))
+        smoothed_prob_out.append(round(smoothed, 4))
         raw_out.append(1 if active else 0)
         if active:
             hc = hf
@@ -171,7 +236,7 @@ def run_new_vvad(frontal_mars, params):
             hc -= 1
         vvad_out.append(1 if hc > 0 else 0)
 
-    return raw_out, vvad_out, var_out, mean_out, zcr_out
+    return raw_out, vvad_out, var_out, mean_out, zcr_out, prob_out, smoothed_prob_out
 
 
 def process_single_dump(dumps_path):
@@ -205,8 +270,8 @@ def process_single_dump(dumps_path):
         frontal_mar_values.append(round(frontal_mar, 6) if frontal_mar is not None else None)
 
     # Run BOTH algorithms
-    old_raw, old_vvad, old_var, old_mean = run_old_vvad(frontal_mar_values, OLD_PARAMS)
-    new_raw, new_vvad, new_var, new_mean, new_zcr = run_new_vvad(frontal_mar_values, NEW_PARAMS)
+    old_raw, old_vvad, old_var, old_mean, old_prob, old_smoothed = run_old_vvad(frontal_mar_values, OLD_PARAMS)
+    new_raw, new_vvad, new_var, new_mean, new_zcr, new_prob, new_smoothed = run_new_vvad(frontal_mar_values, NEW_PARAMS)
 
     # Audio VAD
     vad_times = df_vad['seconds'].values
@@ -235,12 +300,16 @@ def process_single_dump(dumps_path):
         'old_mean': old_mean,
         'old_raw': old_raw,
         'old_vvad': old_vvad,
+        'old_prob': old_prob,
+        'old_smoothed': old_smoothed,
         # NEW algorithm
         'new_var': new_var,
         'new_mean': new_mean,
         'new_zcr': new_zcr,
         'new_raw': new_raw,
         'new_vvad': new_vvad,
+        'new_prob': new_prob,
+        'new_smoothed': new_smoothed,
         # Reference
         'audio_vad': audio_vad_values,
         'yaw': yaw_values,
@@ -582,8 +651,31 @@ def main():
   <canvas id="chart-zcr"></canvas>
 </div>
 
+<div class="charts-grid">
+  <div class="chart-container">
+    <h2>4a. Speech Probability — OLD (var &times; MAR)</h2>
+    <div class="legend-custom">
+      <div class="legend-item"><div class="legend-dot" style="background:rgba(248,113,113,0.7);"></div> Raw Probability</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#f87171;"></div> Smoothed (hold decay)</div>
+      <div class="legend-item"><div class="legend-dot" style="background:rgba(56,189,248,0.4); border:1px dashed #38bdf8;"></div> Audio VAD</div>
+      <div class="legend-item"><div class="legend-dot" style="background:rgba(251,191,36,0.3); border:1px dashed #fbbf24;"></div> Threshold (0.5)</div>
+    </div>
+    <canvas id="chart-prob-old"></canvas>
+  </div>
+  <div class="chart-container">
+    <h2>4b. Speech Probability — NEW (var &times; MAR &times; ZCR)</h2>
+    <div class="legend-custom">
+      <div class="legend-item"><div class="legend-dot" style="background:rgba(74,222,128,0.7);"></div> Raw Probability</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#4ade80;"></div> Smoothed (hold decay)</div>
+      <div class="legend-item"><div class="legend-dot" style="background:rgba(56,189,248,0.4); border:1px dashed #38bdf8;"></div> Audio VAD</div>
+      <div class="legend-item"><div class="legend-dot" style="background:rgba(251,191,36,0.3); border:1px dashed #fbbf24;"></div> Threshold (0.5)</div>
+    </div>
+    <canvas id="chart-prob-new"></canvas>
+  </div>
+</div>
+
 <div class="chart-container">
-  <h2>4. V-VAD Detection Comparison: OLD vs NEW vs Audio VAD</h2>
+  <h2>5. V-VAD Binary Detection: OLD vs NEW vs Audio VAD</h2>
   <div class="legend-custom">
     <div class="legend-item"><div class="legend-dot" style="background:rgba(248,113,113,0.5);"></div> OLD V-VAD</div>
     <div class="legend-item"><div class="legend-dot" style="background:rgba(74,222,128,0.6);"></div> NEW V-VAD</div>
@@ -593,7 +685,7 @@ def main():
 </div>
 
 <div class="chart-container">
-  <h2>5. Head Pose (Euler Angles)</h2>
+  <h2>6. Head Pose (Euler Angles)</h2>
   <div class="legend-custom">
     <div class="legend-item"><div class="legend-dot" style="background:#f87171;"></div> Yaw</div>
     <div class="legend-item"><div class="legend-dot" style="background:#4ade80;"></div> Pitch</div>
@@ -859,7 +951,75 @@ function loadRecording() {{
     }}
   }});
 
-  // 4. V-VAD comparison: OLD vs NEW vs Audio
+  // 4a. Speech Probability — OLD
+  charts.probOld = new Chart(document.getElementById('chart-prob-old'), {{
+    type: 'line',
+    data: {{
+      labels,
+      datasets: [
+        {{ label: 'Raw Prob (OLD)', data: D.old_prob, borderColor: 'rgba(248,113,113,0.5)',
+           backgroundColor: 'rgba(248,113,113,0.08)', fill: true, borderWidth: 1 }},
+        {{ label: 'Smoothed Prob (OLD)', data: D.old_smoothed, borderColor: '#f87171',
+           fill: false, borderWidth: 2 }},
+        {{ label: 'Audio VAD', data: D.audio_vad, borderColor: 'rgba(56,189,248,0.35)',
+           backgroundColor: 'rgba(56,189,248,0.05)', fill: true, stepped: true, borderWidth: 1, borderDash: [4,3] }},
+      ]
+    }},
+    options: {{
+      ...commonOpts,
+      plugins: {{
+        ...commonOpts.plugins,
+        annotation: {{ annotations: {{
+          thr: {{ type:'line', yMin: 0.5, yMax: 0.5,
+                 borderColor:'rgba(251,191,36,0.5)', borderWidth:1.5, borderDash:[6,4],
+                 label: {{ display:true, content:'Decision boundary (0.5)', position:'start',
+                          backgroundColor:'rgba(251,191,36,0.12)', color:'#fbbf24', font:{{size:9}} }} }}
+        }} }}
+      }},
+      scales: {{
+        ...commonOpts.scales,
+        y: {{ ...commonOpts.scales.y, min: 0, max: 1.05,
+              title: {{ display:true, text:'P(speech)', color:'#94a3b8' }},
+              ticks: {{ color: '#94a3b8', stepSize: 0.25 }} }}
+      }}
+    }}
+  }});
+
+  // 4b. Speech Probability — NEW
+  charts.probNew = new Chart(document.getElementById('chart-prob-new'), {{
+    type: 'line',
+    data: {{
+      labels,
+      datasets: [
+        {{ label: 'Raw Prob (NEW)', data: D.new_prob, borderColor: 'rgba(74,222,128,0.5)',
+           backgroundColor: 'rgba(74,222,128,0.08)', fill: true, borderWidth: 1 }},
+        {{ label: 'Smoothed Prob (NEW)', data: D.new_smoothed, borderColor: '#4ade80',
+           fill: false, borderWidth: 2 }},
+        {{ label: 'Audio VAD', data: D.audio_vad, borderColor: 'rgba(56,189,248,0.35)',
+           backgroundColor: 'rgba(56,189,248,0.05)', fill: true, stepped: true, borderWidth: 1, borderDash: [4,3] }},
+      ]
+    }},
+    options: {{
+      ...commonOpts,
+      plugins: {{
+        ...commonOpts.plugins,
+        annotation: {{ annotations: {{
+          thr: {{ type:'line', yMin: 0.5, yMax: 0.5,
+                 borderColor:'rgba(251,191,36,0.5)', borderWidth:1.5, borderDash:[6,4],
+                 label: {{ display:true, content:'Decision boundary (0.5)', position:'start',
+                          backgroundColor:'rgba(251,191,36,0.12)', color:'#fbbf24', font:{{size:9}} }} }}
+        }} }}
+      }},
+      scales: {{
+        ...commonOpts.scales,
+        y: {{ ...commonOpts.scales.y, min: 0, max: 1.05,
+              title: {{ display:true, text:'P(speech)', color:'#94a3b8' }},
+              ticks: {{ color: '#94a3b8', stepSize: 0.25 }} }}
+      }}
+    }}
+  }});
+
+  // 5. V-VAD comparison: OLD vs NEW vs Audio
   charts.vad = new Chart(document.getElementById('chart-vad'), {{
     type: 'line',
     data: {{

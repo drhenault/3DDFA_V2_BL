@@ -375,6 +375,13 @@ class VisualVADDetector:
             or slow head-movement artifacts have low ZCR)
         All three conditions must be met simultaneously.
     
+    Speech Probability:
+        In addition to the binary decision, a continuous speech probability [0, 1]
+        is computed using sigmoid normalization of each feature relative to its
+        threshold. Individual feature scores are multiplied, so probability is high
+        only when ALL features indicate speech. A smoothed version with exponential
+        decay (matching the hold time) is also available.
+    
     Hysteresis (hold-time):
         Once the detector transitions to ACTIVE (speaking), it will maintain that
         state for at least `hold_seconds` even if the MAR signal temporarily drops
@@ -392,6 +399,8 @@ class VisualVADDetector:
         min_zcr: Minimum zero-crossing rate of MAR derivative (default: 3)
     """
     
+    SIGMOID_K = 4.0  # Steepness of sigmoid normalization
+    
     def __init__(self, window_seconds=0.3, fps=30.0, var_threshold=0.005,
                  mar_activity_threshold=0.30, hold_seconds=0.3, min_zcr=3):
         self.window_size = max(4, int(window_seconds * fps))
@@ -399,14 +408,47 @@ class VisualVADDetector:
         self.mar_activity_threshold = mar_activity_threshold
         self.hold_frames = max(1, int(hold_seconds * fps))
         self.min_zcr = min_zcr
+        self._decay = 1.0 - (1.0 / max(1, self.hold_frames))
         # Per-face MAR history: {face_idx: deque([mar_values])}
         self._history = {}
         # Per-face hold countdown: {face_idx: int} — frames remaining in hold
         self._hold_counter = {}
+        # Per-face smoothed probability: {face_idx: float}
+        self._smoothed_prob = {}
+    
+    @staticmethod
+    def _sigmoid(x, center, k=4.0):
+        """Sigmoid function for soft thresholding. Returns 0.5 at x=center."""
+        z = k * (x - center)
+        z = max(-20.0, min(20.0, z))
+        return 1.0 / (1.0 + np.exp(-z))
+    
+    def _compute_probability(self, mar_var, mar_mean, zcr):
+        """
+        Compute continuous speech probability [0, 1] from signal features.
+        
+        Each feature is normalized via sigmoid relative to its threshold (0.5 at
+        the threshold, smooth transition). The combined probability is the product
+        of all individual scores — high only when ALL features indicate speech.
+        
+        Returns:
+            float: Speech probability in [0, 1]
+        """
+        k = self.SIGMOID_K
+        vt = self.var_threshold
+        mt = self.mar_activity_threshold
+        mz = self.min_zcr
+        
+        s_var = self._sigmoid(mar_var / vt, 1.0, k) if vt > 0 else 0.0
+        s_mar = self._sigmoid(mar_mean / mt, 1.0, k) if mt > 0 else 0.0
+        s_zcr = self._sigmoid(zcr / mz, 1.0, k) if mz > 0 else 1.0
+        
+        return float(s_var * s_mar * s_zcr)
     
     def update(self, face_idx, mar_value):
         """
-        Add a new MAR observation for a face and return the activity state.
+        Add a new MAR observation for a face and return the activity state
+        along with speech probability.
         
         Uses hysteresis: once speaking is detected, the ACTIVE state is held for
         at least `hold_frames` even if the signal drops momentarily. Each new
@@ -417,11 +459,15 @@ class VisualVADDetector:
             mar_value: Current Mouth Aspect Ratio (float), or None if unavailable
         
         Returns:
-            bool: True if the speaker is detected as active (speaking), False otherwise.
+            tuple: (is_active: bool, probability: float, smoothed_probability: float)
+                - is_active: True if speaker is detected as active (speaking)
+                - probability: Instantaneous speech probability [0, 1]
+                - smoothed_probability: Smoothed probability with hold decay [0, 1]
         """
         if face_idx not in self._history:
             self._history[face_idx] = deque(maxlen=self.window_size)
             self._hold_counter[face_idx] = 0
+            self._smoothed_prob[face_idx] = 0.0
         
         if mar_value is not None:
             self._history[face_idx].append(mar_value)
@@ -430,6 +476,7 @@ class VisualVADDetector:
         
         # Raw detection from MAR signal (delta-enhanced with ZCR)
         raw_speaking = False
+        probability = 0.0
         if len(history) >= 4:
             values = np.array(history)
             mar_var = np.var(values)
@@ -446,6 +493,13 @@ class VisualVADDetector:
             raw_speaking = ((mar_var > self.var_threshold)
                             and (mar_mean > self.mar_activity_threshold)
                             and (zcr >= self.min_zcr))
+            
+            # Continuous probability
+            probability = self._compute_probability(mar_var, mar_mean, zcr)
+        
+        # Smoothed probability (exponential decay, mirrors hold-time behavior)
+        smoothed = max(probability, self._smoothed_prob[face_idx] * self._decay)
+        self._smoothed_prob[face_idx] = smoothed
         
         # Hysteresis logic
         if raw_speaking:
@@ -457,16 +511,19 @@ class VisualVADDetector:
                 self._hold_counter[face_idx] -= 1
         
         # Active as long as hold timer hasn't expired
-        return self._hold_counter[face_idx] > 0
+        is_active = self._hold_counter[face_idx] > 0
+        return is_active, probability, smoothed
     
     def reset(self, face_idx=None):
         """Clear history for a specific face or all faces."""
         if face_idx is not None:
             self._history.pop(face_idx, None)
             self._hold_counter.pop(face_idx, None)
+            self._smoothed_prob.pop(face_idx, None)
         else:
             self._history.clear()
             self._hold_counter.clear()
+            self._smoothed_prob.clear()
 
 
 def draw_facial_landmarks(frame, landmarks_df, timestamp, face_idx=0,
@@ -529,9 +586,11 @@ def draw_facial_landmarks(frame, landmarks_df, timestamp, face_idx=0,
     
     # --- Visual VAD: determine if speaker is active ---
     is_speaking = False
+    speech_prob = 0.0
+    speech_prob_smoothed = 0.0
     if frontalized_points and vvad_detector is not None:
         mar = compute_mouth_aspect_ratio(frontalized_points)
-        is_speaking = vvad_detector.update(face_idx, mar)
+        is_speaking, speech_prob, speech_prob_smoothed = vvad_detector.update(face_idx, mar)
     
     # --- Drawing ---
     point_radius = 2
