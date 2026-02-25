@@ -48,7 +48,7 @@ def frontalize_mouth_landmarks(points_3d):
     mouth_frontalized = mouth_derotated + centroid
     result = {}
     for i, idx in enumerate(mouth_indices):
-        result[idx] = (mouth_frontalized[i, 0], mouth_frontalized[i, 1])
+        result[idx] = (int(round(mouth_frontalized[i, 0])), int(round(mouth_frontalized[i, 1])))
     return result
 
 
@@ -133,7 +133,12 @@ def _compute_speech_probability(var_value, mean_mar, params, zcr_value=None):
 
 
 def run_old_vvad(frontal_mars, params):
-    """Run OLD baseline V-VAD: var + mean threshold + hold."""
+    """Run OLD baseline V-VAD: var + mean threshold + hold.
+
+    When frontal_mar is None (frontalization failed), the entire V-VAD state
+    is frozen — matching the renderer behavior where vvad_detector.update()
+    is not called when frontalization fails.
+    """
     fps = params['fps']
     ws = max(3, int(params['window_seconds'] * fps))
     hf = max(1, int(params['hold_seconds'] * fps))
@@ -153,8 +158,17 @@ def run_old_vvad(frontal_mars, params):
     decay = 1.0 - (1.0 / max(1, hf))  # decay matches hold time
 
     for m in frontal_mars:
-        if m is not None:
-            hist.append(m)
+        if m is None:
+            # Frontalization failed — freeze V-VAD state (matches renderer)
+            var_out.append(0.0)
+            mean_out.append(0.0)
+            prob_out.append(0.0)
+            smoothed_prob_out.append(round(prev_smoothed, 4))
+            raw_out.append(0)
+            vvad_out.append(1 if hc > 0 else 0)
+            continue
+
+        hist.append(m)
         active = False
         mv = 0.0
         mm = 0.0
@@ -183,7 +197,14 @@ def run_old_vvad(frontal_mars, params):
 
 
 def run_new_vvad(frontal_mars, params):
-    """Run NEW ZCR-enhanced V-VAD: var + mean + ZCR + hold."""
+    """Run NEW ZCR-enhanced V-VAD: var + mean + ZCR + hold.
+
+    When frontal_mar is None (frontalization failed), the entire V-VAD state
+    is frozen — hold counter, smoothed probability, and history are unchanged.
+    This matches the renderer (multiface_distance_render.py) where
+    vvad_detector.update() is NOT called when frontalization fails, leaving
+    the detector's internal state untouched.
+    """
     fps = params['fps']
     ws = max(4, int(params['window_seconds'] * fps))
     hf = max(1, int(params['hold_seconds'] * fps))
@@ -205,8 +226,20 @@ def run_new_vvad(frontal_mars, params):
     decay = 1.0 - (1.0 / max(1, hf))  # decay matches hold time
 
     for m in frontal_mars:
-        if m is not None:
-            hist.append(m)
+        if m is None:
+            # Frontalization failed — freeze V-VAD state (matches renderer:
+            # draw_facial_landmarks skips vvad_detector.update() entirely
+            # when frontalized_points is None)
+            var_out.append(0.0)
+            mean_out.append(0.0)
+            zcr_out.append(0)
+            prob_out.append(0.0)
+            smoothed_prob_out.append(round(prev_smoothed, 4))
+            raw_out.append(0)
+            vvad_out.append(1 if hc > 0 else 0)
+            continue
+
+        hist.append(m)
         active = False
         zcr_val = 0
         mv = 0.0
@@ -246,32 +279,79 @@ def process_single_dump(dumps_path):
 
     timestamps = sorted(df_mouth['seconds'].unique())
 
-    times = []
-    raw_mar_values = []
-    frontal_mar_values = []
+    # Compute actual FPS from CSV timestamps (matches video metadata used by renderer)
+    if len(timestamps) >= 2:
+        dt = np.median(np.diff(timestamps))
+        actual_fps = 1.0 / dt if dt > 0 else 30.0
+    else:
+        actual_fps = 30.0
 
-    for t in timestamps:
-        frame_data = df_mouth[df_mouth['seconds'] == t]
-        face_data = frame_data[frame_data['face_idx'] == 0]
+    times = [round(t, 6) for t in timestamps]
+    n = len(times)
 
-        pts_2d = {}
-        pts_3d = {}
-        for _, row in face_data.iterrows():
-            idx = int(row['point_type'])
-            pts_2d[idx] = (row['x'], row['y'])
-            pts_3d[idx] = (row['x'], row['y'], row['z'])
+    # Find ALL unique face indices (not just face 0)
+    all_face_indices = sorted(int(fi) for fi in df_mouth['face_idx'].unique())
 
-        raw_mar = compute_mar(pts_2d)
-        frontalized = frontalize_mouth_landmarks(pts_3d)
-        frontal_mar = compute_mar(frontalized) if frontalized else None
+    old_params = {**OLD_PARAMS, 'fps': actual_fps}
+    new_params = {**NEW_PARAMS, 'fps': actual_fps}
 
-        times.append(round(t, 6))
-        raw_mar_values.append(round(raw_mar, 6) if raw_mar is not None else None)
-        frontal_mar_values.append(round(frontal_mar, 6) if frontal_mar is not None else None)
+    per_face = {}
+    for fi in all_face_indices:
+        raw_mar_values = []
+        frontal_mar_values = []
 
-    # Run BOTH algorithms
-    old_raw, old_vvad, old_var, old_mean, old_prob, old_smoothed = run_old_vvad(frontal_mar_values, OLD_PARAMS)
-    new_raw, new_vvad, new_var, new_mean, new_zcr, new_prob, new_smoothed = run_new_vvad(frontal_mar_values, NEW_PARAMS)
+        for t in timestamps:
+            frame_data = df_mouth[df_mouth['seconds'] == t]
+            face_data = frame_data[frame_data['face_idx'] == fi]
+
+            if face_data.empty:
+                # Face not present in this frame
+                raw_mar_values.append(None)
+                frontal_mar_values.append(None)
+                continue
+
+            pts_2d = {}
+            pts_3d = {}
+            for _, row in face_data.iterrows():
+                idx = int(row['point_type'])
+                pts_2d[idx] = (row['x'], row['y'])
+                pts_3d[idx] = (row['x'], row['y'], row['z'])
+
+            raw_mar = compute_mar(pts_2d)
+            frontalized = frontalize_mouth_landmarks(pts_3d)
+            frontal_mar = compute_mar(frontalized) if frontalized else None
+
+            raw_mar_values.append(round(raw_mar, 6) if raw_mar is not None else None)
+            frontal_mar_values.append(
+                float(frontal_mar) if frontal_mar is not None else None)
+
+        # Run BOTH algorithms for this face
+        old_raw, old_vvad, old_var, old_mean, old_prob, old_smoothed = \
+            run_old_vvad(frontal_mar_values, old_params)
+        new_raw, new_vvad, new_var, new_mean, new_zcr, new_prob, new_smoothed = \
+            run_new_vvad(frontal_mar_values, new_params)
+
+        per_face[fi] = {
+            'raw_mar': raw_mar_values,
+            'frontal_mar': frontal_mar_values,
+            'old_var': old_var, 'old_mean': old_mean,
+            'old_prob': old_prob, 'old_smoothed': old_smoothed,
+            'old_raw': old_raw, 'old_vvad': old_vvad,
+            'new_var': new_var, 'new_mean': new_mean,
+            'new_zcr': new_zcr, 'new_prob': new_prob,
+            'new_smoothed': new_smoothed, 'new_raw': new_raw,
+            'new_vvad': new_vvad,
+        }
+
+    # Combined V-VAD: active if ANY face is active
+    old_vvad_combined = [0] * n
+    new_vvad_combined = [0] * n
+    for fi_data in per_face.values():
+        for i in range(n):
+            if fi_data['old_vvad'][i]:
+                old_vvad_combined[i] = 1
+            if fi_data['new_vvad'][i]:
+                new_vvad_combined[i] = 1
 
     # Audio VAD
     vad_times = df_vad['seconds'].values
@@ -293,23 +373,11 @@ def process_single_dump(dumps_path):
 
     return {
         'times': times,
-        'raw_mar': raw_mar_values,
-        'frontal_mar': frontal_mar_values,
-        # OLD algorithm
-        'old_var': old_var,
-        'old_mean': old_mean,
-        'old_raw': old_raw,
-        'old_vvad': old_vvad,
-        'old_prob': old_prob,
-        'old_smoothed': old_smoothed,
-        # NEW algorithm
-        'new_var': new_var,
-        'new_mean': new_mean,
-        'new_zcr': new_zcr,
-        'new_raw': new_raw,
-        'new_vvad': new_vvad,
-        'new_prob': new_prob,
-        'new_smoothed': new_smoothed,
+        'face_indices': all_face_indices,
+        'per_face': per_face,
+        # Combined V-VAD — active if ANY face is active (OR across faces)
+        'old_vvad': old_vvad_combined,
+        'new_vvad': new_vvad_combined,
         # Reference
         'audio_vad': audio_vad_values,
         'yaw': yaw_values,
@@ -334,6 +402,7 @@ def main():
         print(f"  Processing: {name} ({label})...")
         all_data[label] = process_single_dump(dump_path)
         print(f"    → {len(all_data[label]['times'])} frames, "
+              f"{len(all_data[label]['face_indices'])} face(s), "
               f"{all_data[label]['times'][-1]:.1f}s")
 
     data_json = json.dumps(all_data, indent=None)
@@ -675,10 +744,10 @@ def main():
 </div>
 
 <div class="chart-container">
-  <h2>5. V-VAD Binary Detection: OLD vs NEW vs Audio VAD</h2>
+  <h2>5. V-VAD Binary Detection: OLD vs NEW vs Audio VAD (any face)</h2>
   <div class="legend-custom">
-    <div class="legend-item"><div class="legend-dot" style="background:rgba(248,113,113,0.5);"></div> OLD V-VAD</div>
-    <div class="legend-item"><div class="legend-dot" style="background:rgba(74,222,128,0.6);"></div> NEW V-VAD</div>
+    <div class="legend-item"><div class="legend-dot" style="background:rgba(248,113,113,0.5);"></div> OLD V-VAD (any face)</div>
+    <div class="legend-item"><div class="legend-dot" style="background:rgba(74,222,128,0.6);"></div> NEW V-VAD (any face)</div>
     <div class="legend-item"><div class="legend-dot" style="background:rgba(56,189,248,0.4);"></div> Audio VAD (reference)</div>
   </div>
   <canvas id="chart-vad"></canvas>
@@ -760,6 +829,10 @@ function loadRecording() {{
   const n = D.times.length;
   const dur = D.times[n-1];
 
+  // Multi-face support
+  const faces = D.face_indices || [0];
+  const nFaces = faces.length;
+
   const oldS = computeStats(D.old_vvad, D.audio_vad);
   const newS = computeStats(D.new_vvad, D.audio_vad);
   const audioAct = D.audio_vad.filter(v=>v===1).length;
@@ -772,6 +845,10 @@ function loadRecording() {{
     <div class="stat-card">
       <div class="stat-value" style="color:var(--accent2);">${{(audioAct/n*100).toFixed(1)}}%</div>
       <div class="stat-label">Audio VAD Active</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" style="color:var(--orange);">${{nFaces}}</div>
+      <div class="stat-label">Faces Tracked</div>
     </div>
     <div class="stat-card">
       <div class="stat-label" style="margin-bottom:4px">Agreement %</div>
@@ -820,13 +897,18 @@ function loadRecording() {{
     </div>
   `;
 
+  // Face color palette for multi-face support
+  const FACE_RGB = [[56,189,248],[167,139,250],[251,146,60],[244,114,182],[52,211,153],[251,191,36]];
+  function fC(i, a) {{ const c = FACE_RGB[i % FACE_RGB.length]; return a != null ? `rgba(${{c[0]}},${{c[1]}},${{c[2]}},${{a}})` : `rgb(${{c[0]}},${{c[1]}},${{c[2]}})`; }}
+  const fL = (p, fi) => nFaces > 1 ? `${{p}} (face ${{fi}})` : p;
+
   const commonOpts = {{
     responsive: true,
     maintainAspectRatio: false,
     animation: {{ duration: 250 }},
     interaction: {{ mode: 'index', intersect: false }},
     plugins: {{
-      legend: {{ display: false }},
+      legend: {{ display: true, labels: {{ color: '#94a3b8', boxWidth: 10, padding: 4, font: {{ size: 9 }} }} }},
       tooltip: {{
         backgroundColor: '#1e293b',
         titleColor: '#f1f5f9',
@@ -850,16 +932,30 @@ function loadRecording() {{
     elements: {{ point: {{ radius: 0 }}, line: {{ borderWidth: 1.5 }} }}
   }};
 
+  // Build per-face datasets for all charts
+  const marDs = [], varOldDs = [], varNewDs = [], zcrDs = [];
+  const probOldDs = [], probNewDs = [];
+  faces.forEach((fi, i) => {{
+    const fc = D.per_face[fi];
+    if (i === 0) marDs.push({{ label: fL('Raw MAR', fi), data: fc.raw_mar, borderColor: 'rgba(148,163,184,0.5)', fill: false, borderWidth: 1 }});
+    marDs.push({{ label: fL('Frontal MAR', fi), data: fc.frontal_mar, borderColor: fC(i), fill: false, borderWidth: 1.5 }});
+    varOldDs.push({{ label: fL('Variance', fi), data: fc.old_var, borderColor: fC(i), backgroundColor: fC(i, 0.1), fill: true, borderWidth: 1.2 }});
+    varNewDs.push({{ label: fL('Variance', fi), data: fc.new_var, borderColor: fC(i), backgroundColor: fC(i, 0.1), fill: true, borderWidth: 1.2 }});
+    zcrDs.push({{ label: fL('ZCR', fi), data: fc.new_zcr, borderColor: fC(i), backgroundColor: fC(i, 0.1), fill: true, borderWidth: 1.5 }});
+    probOldDs.push({{ label: fL('Smoothed', fi), data: fc.old_smoothed, borderColor: fC(i), fill: false, borderWidth: 2 }});
+    probOldDs.push({{ label: fL('Raw Prob', fi), data: fc.old_prob, borderColor: fC(i, 0.4), backgroundColor: fC(i, 0.06), fill: true, borderWidth: 1 }});
+    probNewDs.push({{ label: fL('Smoothed', fi), data: fc.new_smoothed, borderColor: fC(i), fill: false, borderWidth: 2 }});
+    probNewDs.push({{ label: fL('Raw Prob', fi), data: fc.new_prob, borderColor: fC(i, 0.4), backgroundColor: fC(i, 0.06), fill: true, borderWidth: 1 }});
+  }});
+  const avadDs = {{ label: 'Audio VAD', data: D.audio_vad, borderColor: 'rgba(56,189,248,0.35)',
+    backgroundColor: 'rgba(56,189,248,0.05)', fill: true, stepped: true, borderWidth: 1, borderDash: [4,3] }};
+  probOldDs.push(avadDs);
+  probNewDs.push({{...avadDs}});
+
   // 1. MAR with both thresholds
   charts.mar = new Chart(document.getElementById('chart-mar'), {{
     type: 'line',
-    data: {{
-      labels,
-      datasets: [
-        {{ label: 'Raw MAR', data: D.raw_mar, borderColor: 'rgba(148,163,184,0.5)', fill: false, borderWidth: 1 }},
-        {{ label: 'Frontalized MAR', data: D.frontal_mar, borderColor: '#38bdf8', fill: false, borderWidth: 1.5 }},
-      ]
-    }},
+    data: {{ labels, datasets: marDs }},
     options: {{
       ...commonOpts,
       plugins: {{
@@ -875,19 +971,14 @@ function loadRecording() {{
                              backgroundColor:'rgba(74,222,128,0.12)', color:'#4ade80', font:{{size:10}} }} }}
         }} }}
       }},
-      scales: {{ ...commonOpts.scales, y: {{ ...commonOpts.scales.y, title: {{ display:true, text:'MAR', color:'#94a3b8' }} }} }}
+      scales: {{ ...commonOpts.scales, y: {{ ...commonOpts.scales.y, min: 0, max: 0.7, title: {{ display:true, text:'MAR', color:'#94a3b8' }} }} }}
     }}
   }});
 
   // 2a. Variance OLD
   charts.varOld = new Chart(document.getElementById('chart-var-old'), {{
     type: 'line',
-    data: {{
-      labels,
-      datasets: [
-        {{ label: 'Variance (OLD)', data: D.old_var, borderColor: '#f87171', backgroundColor: 'rgba(248,113,113,0.1)', fill: true, borderWidth: 1.2 }},
-      ]
-    }},
+    data: {{ labels, datasets: varOldDs }},
     options: {{
       ...commonOpts,
       plugins: {{
@@ -899,19 +990,14 @@ function loadRecording() {{
                           backgroundColor:'rgba(248,113,113,0.12)', color:'#f87171', font:{{size:10}} }} }}
         }} }}
       }},
-      scales: {{ ...commonOpts.scales, y: {{ ...commonOpts.scales.y, title: {{ display:true, text:'Var', color:'#94a3b8' }} }} }}
+      scales: {{ ...commonOpts.scales, y: {{ ...commonOpts.scales.y, min: 0, max: 0.02, title: {{ display:true, text:'Var', color:'#94a3b8' }} }} }}
     }}
   }});
 
   // 2b. Variance NEW
   charts.varNew = new Chart(document.getElementById('chart-var-new'), {{
     type: 'line',
-    data: {{
-      labels,
-      datasets: [
-        {{ label: 'Variance (NEW)', data: D.new_var, borderColor: '#4ade80', backgroundColor: 'rgba(74,222,128,0.1)', fill: true, borderWidth: 1.2 }},
-      ]
-    }},
+    data: {{ labels, datasets: varNewDs }},
     options: {{
       ...commonOpts,
       plugins: {{
@@ -923,19 +1009,14 @@ function loadRecording() {{
                           backgroundColor:'rgba(74,222,128,0.12)', color:'#4ade80', font:{{size:10}} }} }}
         }} }}
       }},
-      scales: {{ ...commonOpts.scales, y: {{ ...commonOpts.scales.y, title: {{ display:true, text:'Var', color:'#94a3b8' }} }} }}
+      scales: {{ ...commonOpts.scales, y: {{ ...commonOpts.scales.y, min: 0, max: 0.02, title: {{ display:true, text:'Var', color:'#94a3b8' }} }} }}
     }}
   }});
 
   // 3. ZCR
   charts.zcr = new Chart(document.getElementById('chart-zcr'), {{
     type: 'line',
-    data: {{
-      labels,
-      datasets: [
-        {{ label: 'ZCR', data: D.new_zcr, borderColor: '#fb923c', backgroundColor: 'rgba(251,146,60,0.1)', fill: true, borderWidth: 1.5 }},
-      ]
-    }},
+    data: {{ labels, datasets: zcrDs }},
     options: {{
       ...commonOpts,
       plugins: {{
@@ -954,17 +1035,7 @@ function loadRecording() {{
   // 4a. Speech Probability — OLD
   charts.probOld = new Chart(document.getElementById('chart-prob-old'), {{
     type: 'line',
-    data: {{
-      labels,
-      datasets: [
-        {{ label: 'Raw Prob (OLD)', data: D.old_prob, borderColor: 'rgba(248,113,113,0.5)',
-           backgroundColor: 'rgba(248,113,113,0.08)', fill: true, borderWidth: 1 }},
-        {{ label: 'Smoothed Prob (OLD)', data: D.old_smoothed, borderColor: '#f87171',
-           fill: false, borderWidth: 2 }},
-        {{ label: 'Audio VAD', data: D.audio_vad, borderColor: 'rgba(56,189,248,0.35)',
-           backgroundColor: 'rgba(56,189,248,0.05)', fill: true, stepped: true, borderWidth: 1, borderDash: [4,3] }},
-      ]
-    }},
+    data: {{ labels, datasets: probOldDs }},
     options: {{
       ...commonOpts,
       plugins: {{
@@ -988,17 +1059,7 @@ function loadRecording() {{
   // 4b. Speech Probability — NEW
   charts.probNew = new Chart(document.getElementById('chart-prob-new'), {{
     type: 'line',
-    data: {{
-      labels,
-      datasets: [
-        {{ label: 'Raw Prob (NEW)', data: D.new_prob, borderColor: 'rgba(74,222,128,0.5)',
-           backgroundColor: 'rgba(74,222,128,0.08)', fill: true, borderWidth: 1 }},
-        {{ label: 'Smoothed Prob (NEW)', data: D.new_smoothed, borderColor: '#4ade80',
-           fill: false, borderWidth: 2 }},
-        {{ label: 'Audio VAD', data: D.audio_vad, borderColor: 'rgba(56,189,248,0.35)',
-           backgroundColor: 'rgba(56,189,248,0.05)', fill: true, stepped: true, borderWidth: 1, borderDash: [4,3] }},
-      ]
-    }},
+    data: {{ labels, datasets: probNewDs }},
     options: {{
       ...commonOpts,
       plugins: {{
@@ -1019,15 +1080,15 @@ function loadRecording() {{
     }}
   }});
 
-  // 5. V-VAD comparison: OLD vs NEW vs Audio
+  // 5. V-VAD comparison (combined: active if ANY face is active)
   charts.vad = new Chart(document.getElementById('chart-vad'), {{
     type: 'line',
     data: {{
       labels,
       datasets: [
-        {{ label: 'OLD V-VAD', data: D.old_vvad.map(v => v * 0.85), borderColor: '#f87171',
+        {{ label: 'OLD V-VAD (any face)', data: D.old_vvad.map(v => v * 0.85), borderColor: '#f87171',
            backgroundColor: 'rgba(248,113,113,0.12)', fill: true, stepped: true, borderWidth: 1.5 }},
-        {{ label: 'NEW V-VAD', data: D.new_vvad, borderColor: '#4ade80',
+        {{ label: 'NEW V-VAD (any face)', data: D.new_vvad, borderColor: '#4ade80',
            backgroundColor: 'rgba(74,222,128,0.12)', fill: true, stepped: true, borderWidth: 2 }},
         {{ label: 'Audio VAD', data: D.audio_vad.map(v => v * 1.1), borderColor: 'rgba(56,189,248,0.5)',
            backgroundColor: 'rgba(56,189,248,0.06)', fill: true, stepped: true, borderWidth: 1.5, borderDash: [4,3] }},
@@ -1047,7 +1108,7 @@ function loadRecording() {{
     }}
   }});
 
-  // 5. Pose
+  // 6. Pose
   charts.pose = new Chart(document.getElementById('chart-pose'), {{
     type: 'line',
     data: {{
