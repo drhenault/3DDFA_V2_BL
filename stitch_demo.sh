@@ -8,7 +8,7 @@
 TDDFA_V2_DIRECTORY_PATH="$(pwd)/"
 VIDEO_PATH="$(pwd)/inputs/example_1.mp4"
 AUDIO_PIPELINE_DIRECTORY_PATH="/work/user_data/hboratyn/repos/leapfox/"
-FACENET_DIRECTORY_PATH="/work/user_data/hboratyn/repos/facenet/"
+FACENET_DIRECTORY_PATH="/work/user_data/hboratyn/3ddfa_v2/facenet/"
 
 # Obtain audio from video and save to the same directory
 python3 extract_wav_from_video.py -i "$VIDEO_PATH"

@@ -33,5 +33,76 @@ demo_for_*.py
 inputs/*
 outputs/*
 dumps/*
+enrollment-avatars/*
+!enrollment-avatars/.gitkeep
 
+# Facenet
+# Facenet cache/build artifacts
+facenet/__pycache__/
+facenet/*.py[cod]
+facenet/*$py.class
 
+# Facenet C extensions
+facenet/*.so
+
+# Facenet packaging/distribution
+facenet/.Python
+facenet/env/
+facenet/build/
+facenet/develop-eggs/
+facenet/dist/
+facenet/downloads/
+facenet/eggs/
+facenet/.eggs/
+facenet/lib/
+facenet/lib64/
+facenet/parts/
+facenet/sdist/
+facenet/var/
+facenet/wheels/
+facenet/*.egg-info/
+facenet/.installed.cfg
+facenet/*.egg
+
+# Facenet PyInstaller
+facenet/*.manifest
+facenet/*.spec
+
+# Facenet installer logs
+facenet/pip-log.txt
+facenet/pip-delete-this-directory.txt
+
+# Facenet unit test / coverage reports
+facenet/htmlcov/
+facenet/.tox/
+facenet/.coverage
+facenet/.coverage.*
+facenet/.cache
+facenet/nosetests.xml
+facenet/coverage.xml
+facenet/,cover
+facenet/.hypothesis/
+
+# Facenet translations
+facenet/*.mo
+facenet/*.pot
+
+# Facenet Django stuff:
+facenet/*.log
+facenet/local_settings.py
+
+# Facenet Flask stuff:
+facenet/instance/
+facenet/.webassets-cache
+
+# Facenet Scrapy stuff:
+facenet/.scrapy
+
+# Facenet Sphinx documentation
+facenet/docs/_build/
+
+# Facenet PyBuilder
+facenet/target/
+
+# Facenet Jupyter Notebook
+facenet/.ipynb_checkpoints/
