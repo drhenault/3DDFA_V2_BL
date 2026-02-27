@@ -2,9 +2,10 @@
 # coding: utf-8
 
 """
-Multi-Face Distance Video Renderer
+Multi-Face Distance Video Renderer with Speaker Avatars
 Renders an annotated video with face distance dashboard overlay
-Uses pre-computed CSV dumps for fast rendering
+and speaker identification avatars above detected faces.
+Uses pre-computed CSV dumps for fast rendering.
 """
 
 import argparse
@@ -17,6 +18,7 @@ from tqdm import tqdm
 from collections import deque
 import subprocess
 import os
+from scipy.optimize import linear_sum_assignment
 
 # Color scheme for different faces (BGR format for OpenCV)
 FACE_COLORS_BGR = [
@@ -40,6 +42,153 @@ def calculate_distance(z_value):
     if z_value <= 0:
         return 0
     return 100.0 / z_value
+
+
+# ---------------------------------------------------------------------------
+# Face identity from embeddings (stable identity across frames)
+# Use a face recognition/embedding model (e.g. InsightFace, FaceNet, dlib) to
+# extract one vector per (frame, face). Pass precomputed embeddings via
+# --embeddings path.npz; this module matches faces frame-to-frame by
+# embedding similarity (cosine) and assigns stable track IDs.
+#
+# You do NOT need to change your dump data. The existing mouth_position.csv
+# already has 68 landmark (x,y,z) per (seconds, face_idx). From those you
+# derive a face bbox (min/max x,y + padding) and crop the frame. See
+# extract_face_embeddings.py for a script that iterates (seconds, face_idx),
+# crops using landmarks, and optionally runs your embedding model → .npz.
+# ---------------------------------------------------------------------------
+
+def _normalize_embeddings(emb):
+    """L2-normalize rows for cosine similarity via dot product."""
+    n = np.linalg.norm(emb, axis=1, keepdims=True)
+    n = np.where(n > 1e-12, n, 1.0)
+    return emb / n
+
+
+def _assignment_by_similarity(prev_track_embs, curr_face_embs, similarity_threshold=0.0):
+    """
+    Assign current faces to previous tracks by maximizing cosine similarity.
+    prev_track_embs: list of (track_id, embedding 1D array)
+    curr_face_embs: list of (face_idx, embedding 1D array)
+    Returns: list of (curr_face_idx, track_id). Uses Hungarian on cost = 1 - similarity.
+    """
+    n_curr = len(curr_face_embs)
+    n_prev = len(prev_track_embs)
+    if n_curr == 0:
+        return []
+    if n_prev == 0:
+        return [(c[0], i) for i, c in enumerate(curr_face_embs)]
+
+    prev_ids = [t[0] for t in prev_track_embs]
+    prev_emb = np.array([t[1] for t in prev_track_embs], dtype=np.float64)
+    curr_idx = [c[0] for c in curr_face_embs]
+    curr_emb = np.array([c[1] for c in curr_face_embs], dtype=np.float64)
+    prev_emb = _normalize_embeddings(prev_emb)
+    curr_emb = _normalize_embeddings(curr_emb)
+    # similarity (n_curr, n_prev); cost = 1 - similarity
+    sim = np.dot(curr_emb, prev_emb.T)
+    cost = 1.0 - np.clip(sim, -1.0, 1.0)
+
+    if n_curr <= n_prev:
+        row_ind, col_ind = linear_sum_assignment(cost)
+        return [(curr_idx[r], prev_ids[c]) for r, c in zip(row_ind, col_ind)]
+    # n_curr > n_prev: add virtual "new" columns
+    new_col_cost = 1.0 - similarity_threshold
+    cost_mat = np.full((n_curr, n_curr), new_col_cost, dtype=np.float64)
+    cost_mat[:, :n_prev] = cost
+    row_ind, col_ind = linear_sum_assignment(cost_mat)
+    next_id = max(prev_ids) + 1
+    result = []
+    new_id = next_id
+    for r, c in zip(row_ind, col_ind):
+        if c < n_prev:
+            track_id = prev_ids[c]
+        else:
+            track_id = new_id
+            new_id += 1
+        result.append((curr_idx[r], track_id))
+    return result
+
+
+def load_embeddings_npz(path):
+    """
+    Load precomputed face embeddings from a .npz file.
+    Expected keys: 'embeddings' (N, D), 'seconds' (N,), 'face_idx' (N,).
+    Each row i corresponds to one (seconds[i], face_idx[i]) with embedding embeddings[i].
+    Use a face recognition model (e.g. InsightFace, FaceNet, dlib) on each detected face
+    crop (aligned using dumps landmarks or bbox) and save in this format for --embeddings.
+    Returns: (embeddings, seconds, face_idx).
+    """
+    data = np.load(path, allow_pickle=False)
+    emb = np.asarray(data['embeddings'], dtype=np.float64)
+    sec = np.asarray(data['seconds'], dtype=np.float64).ravel()
+    fidx = np.asarray(data['face_idx'], dtype=np.int64).ravel()
+    if len(sec) != len(fidx) or len(sec) != len(emb):
+        raise ValueError("embeddings.npz: 'embeddings', 'seconds', 'face_idx' must have same length")
+    return emb, sec, fidx
+
+
+def compute_face_track_ids_from_embeddings(embeddings, seconds_arr, face_idx_arr, df_face_count,
+                                          similarity_threshold=0.3, drop_after_frames=60):
+    """
+    Assign stable track IDs by matching face embeddings across consecutive frames.
+    embeddings: (N, D) array; seconds_arr, face_idx_arr: (N,) arrays; each row is one (seconds, face_idx).
+    Returns: dict (round(seconds,6), face_idx_orig) -> track_id for reindexing.
+    """
+    sec_key = np.round(seconds_arr, 6)
+    # Build (seconds, face_idx) -> embedding
+    key_to_emb = {}
+    for i in range(len(sec_key)):
+        key = (float(sec_key[i]), int(face_idx_arr[i]))
+        key_to_emb[key] = embeddings[i]
+
+    frames = df_face_count.sort_values('seconds')[['seconds', 'face_count']].values
+    assignment_map = {}
+    tracks = {}  # track_id -> (embedding, last_frame_idx)
+    tol = 0.001
+
+    for frame_idx, (seconds, face_count) in enumerate(frames):
+        sec_k = round(float(seconds), 6)
+        curr_list = []
+        for fi in range(int(face_count)):
+            key = (sec_k, fi)
+            if key in key_to_emb:
+                curr_list.append((fi, key_to_emb[key].copy()))
+        if not curr_list:
+            to_drop = [tid for tid, (_, last) in tracks.items() if frame_idx - last >= drop_after_frames]
+            for tid in to_drop:
+                del tracks[tid]
+            continue
+
+        prev_list = [(tid, emb) for tid, (emb, last) in tracks.items()]
+        assignment = _assignment_by_similarity(prev_list, curr_list, similarity_threshold=similarity_threshold)
+
+        for (curr_face_idx, track_id) in assignment:
+            assignment_map[(sec_k, curr_face_idx)] = track_id
+            key = (sec_k, curr_face_idx)
+            if key in key_to_emb:
+                tracks[track_id] = (key_to_emb[key].copy(), frame_idx)
+
+        for tid in list(tracks.keys()):
+            if frame_idx - tracks[tid][1] >= drop_after_frames:
+                del tracks[tid]
+
+    return assignment_map
+
+
+def reindex_mouth_by_track_id(df_mouth, assignment_map):
+    """
+    Replace face_idx in df_mouth with stable track_id using assignment_map.
+    assignment_map: (seconds, face_idx_orig) -> track_id. Seconds rounded to 6 decimals.
+    """
+    def track_id_for_row(row):
+        key = (round(float(row['seconds']), 6), int(row['face_idx']))
+        return assignment_map.get(key, row['face_idx'])
+
+    df = df_mouth.copy()
+    new_idx = df.apply(track_id_for_row, axis=1)
+    df['face_idx'] = new_idx.astype(int)
+    return df
 
 
 def draw_line_graph(frame, x, y, width, height, data_points, title, show_value=False, current_value=None, unit=""):
@@ -777,41 +926,23 @@ def draw_dashboard(frame, frame_idx, face_count, face_distances, timestamp, audi
     
     current_y += 28
     
-    # Always draw slots for 2 faces (fixed layout)
+    # Draw slots for up to 2 faces (fixed layout); face_distances keyed by track ID
+    sorted_faces = sorted(face_distances.items())[:2]
     for slot_idx in range(2):
-        # Check if we have data for this face
-        if slot_idx in face_distances:
-            # Face detected - show with color
-            face_idx = slot_idx
-            distance = face_distances[face_idx]
+        if slot_idx < len(sorted_faces):
+            face_idx, distance = sorted_faces[slot_idx]
             color_idx = face_idx % len(FACE_COLORS_BGR)
             face_color = FACE_COLORS_BGR[color_idx]
-            
-            # Draw colored indicator dot
-            cv2.circle(frame, 
-                      (panel_x + 22, current_y - 6), 
-                      7, face_color, -1)
-            
-            # Draw face distance
+            cv2.circle(frame, (panel_x + 22, current_y - 6), 7, face_color, -1)
             dist_text = f"Face {face_idx}: {distance:.1f} m"
-            cv2.putText(frame, dist_text, 
-                       (panel_x + 40, current_y),
+            cv2.putText(frame, dist_text, (panel_x + 40, current_y),
                        font, text_font_scale, text_color, text_thickness)
         else:
-            # No face in this slot - show placeholder
             gray_color = (100, 100, 100)
-            
-            # Draw gray indicator dot
-            cv2.circle(frame, 
-                      (panel_x + 22, current_y - 6), 
-                      7, gray_color, -1)
-            
-            # Draw placeholder text
+            cv2.circle(frame, (panel_x + 22, current_y - 6), 7, gray_color, -1)
             placeholder_text = f"Face {slot_idx}: ---"
-            cv2.putText(frame, placeholder_text, 
-                       (panel_x + 40, current_y),
+            cv2.putText(frame, placeholder_text, (panel_x + 40, current_y),
                        font, text_font_scale, gray_color, text_thickness)
-        
         current_y += line_height
     
     # Draw Audio section separator
@@ -1018,6 +1149,152 @@ def draw_face_boxes(frame, face_data, timestamp):
     return frame
 
 
+def load_speaker_identification(csv_path, reference_seconds=None):
+    """
+    Load speaker identification data and build a fast lookup dictionary.
+
+    The speaker_identification.csv may use a slightly different time base than
+    the other dumps (face_count.csv, mouth_position.csv).  When
+    *reference_seconds* is provided (sorted array of canonical timestamps from
+    face_count.csv), each speaker timestamp is snapped to the nearest
+    reference timestamp so that downstream exact-match lookups work.
+
+    Args:
+        csv_path: path to speaker_identification.csv
+        reference_seconds: optional 1-D sorted array of canonical timestamps
+
+    Returns:
+        dict mapping (rounded_seconds, face_idx) -> speaker_name
+    """
+    df = pd.read_csv(csv_path)
+
+    ref = None
+    if reference_seconds is not None:
+        ref = np.asarray(reference_seconds, dtype=np.float64)
+
+    lookup = {}
+    for _, row in df.iterrows():
+        sec = float(row['seconds'])
+        if ref is not None and len(ref) > 0:
+            idx = np.searchsorted(ref, sec)
+            candidates = []
+            if idx > 0:
+                candidates.append(ref[idx - 1])
+            if idx < len(ref):
+                candidates.append(ref[idx])
+            nearest = min(candidates, key=lambda x: abs(x - sec))
+            sec = float(nearest)
+        key = (round(sec, 6), int(row['face_idx']))
+        lookup[key] = str(row['speaker'])
+    return lookup
+
+
+def load_avatars(avatars_dir):
+    """
+    Load avatar images from a directory, keyed by speaker name (filename stem).
+
+    Returns:
+        dict mapping speaker_name -> BGR numpy array
+    """
+    avatars = {}
+    avatars_path = Path(avatars_dir)
+    if not avatars_path.exists():
+        print(f"  Warning: avatars directory not found: {avatars_path}")
+        return avatars
+    for img_path in avatars_path.iterdir():
+        if img_path.suffix.lower() in ('.jpg', '.jpeg', '.png', '.bmp'):
+            img = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
+            if img is not None:
+                avatars[img_path.stem] = img
+    return avatars
+
+
+def reindex_speaker_lookup(speaker_lookup, assignment_map):
+    """
+    Remap face_idx in the speaker lookup using the embedding-based assignment map,
+    so that speaker identities align with the stable track IDs.
+    """
+    remapped = {}
+    for (sec, face_idx), speaker in speaker_lookup.items():
+        new_face_idx = assignment_map.get((sec, face_idx), face_idx)
+        remapped[(sec, int(new_face_idx))] = speaker
+    return remapped
+
+
+def draw_speaker_avatar(frame, avatar_img, face_landmarks_df,
+                        avatar_size=80, height_scale=1.1):
+    """
+    Overlay a circular miniature avatar image above a detected face.
+
+    Positioning: compute |chin→nose_bridge| * height_scale + avatar_radius,
+    then place the avatar centre that many pixels *straight up* from the
+    nose bridge.  If the avatar would be cropped at the top of the frame,
+    it is clamped so it stays fully visible.
+
+    Args:
+        frame: Video frame (BGR, must be contiguous)
+        avatar_img: Speaker avatar image (BGR)
+        face_landmarks_df: DataFrame rows for all landmarks of this face/timestamp
+        avatar_size: Fixed avatar width in pixels (independent of face size)
+        height_scale: Multiplier on |chin→nose_bridge| for the upward offset
+    """
+    pt = {}
+    for _, row in face_landmarks_df.iterrows():
+        pt[int(row['point_type'])] = (float(row['x']), float(row['y']))
+
+    if 8 not in pt or 27 not in pt:
+        return frame
+
+    chin = np.array(pt[8], dtype=np.float64)
+    nose_bridge = np.array(pt[27], dtype=np.float64)
+
+    chin_to_bridge = nose_bridge - chin
+    vec_len = np.linalg.norm(chin_to_bridge)
+    if vec_len < 1.0:
+        return frame
+
+    avatar_w = max(20, avatar_size)
+    h_orig, w_orig = avatar_img.shape[:2]
+    avatar_h = int(avatar_w * h_orig / w_orig)
+    if avatar_h <= 0:
+        return frame
+
+    avatar_resized = cv2.resize(avatar_img, (avatar_w, avatar_h),
+                                interpolation=cv2.INTER_AREA)
+
+    mask = np.zeros((avatar_h, avatar_w), dtype=np.uint8)
+    cx, cy = avatar_w // 2, avatar_h // 2
+    radius = min(avatar_w, avatar_h) // 2
+    cv2.circle(mask, (cx, cy), radius, 255, -1, cv2.LINE_AA)
+
+    # Offset = |chin→bridge| * height_scale + radius, applied straight up
+    offset = vec_len * height_scale + radius
+    avatar_cx = int(round(nose_bridge[0]))
+    avatar_cy = int(round(nose_bridge[1] - offset))
+
+    frame_h, frame_w = frame.shape[:2]
+
+    # Clamp so the avatar stays fully inside the frame
+    avatar_cy = max(avatar_h // 2, min(avatar_cy, frame_h - 1 - avatar_h // 2))
+    avatar_cx = max(avatar_w // 2, min(avatar_cx, frame_w - 1 - avatar_w // 2))
+
+    x1 = avatar_cx - avatar_w // 2
+    y1 = avatar_cy - avatar_h // 2
+
+    roi = frame[y1:y1 + avatar_h, x1:x1 + avatar_w]
+    mask_roi = mask[:roi.shape[0], :roi.shape[1]]
+    avatar_roi = avatar_resized[:roi.shape[0], :roi.shape[1]]
+
+    alpha = (mask_roi / 255.0)[:, :, np.newaxis]
+    blended = (avatar_roi * alpha + roi * (1.0 - alpha)).astype(np.uint8)
+    frame[y1:y1 + avatar_h, x1:x1 + avatar_w] = blended
+
+    cv2.circle(frame, (avatar_cx, avatar_cy), radius + 2,
+               (255, 255, 255), 2, cv2.LINE_AA)
+
+    return frame
+
+
 def copy_audio_with_ffmpeg(input_video, temp_video, final_output):
     """
     Copy audio from input video to rendered video using ffmpeg
@@ -1082,9 +1359,10 @@ def copy_audio_with_ffmpeg(input_video, temp_video, final_output):
         return False
 
 
-def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_vad, output_path, show_markers=True):
+def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_vad, output_path,
+                                show_markers=True, speaker_lookup=None, avatars=None):
     """
-    Render annotated video with dashboard overlay
+    Render annotated video with dashboard overlay and speaker avatars.
     
     Args:
         video_path: Path to input video
@@ -1094,6 +1372,8 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
         df_vad: DataFrame with VAD (Voice Activity Detection) data
         output_path: Path to output video
         show_markers: Whether to show facial landmark markers
+        speaker_lookup: dict (seconds, face_idx) -> speaker_name (from speaker_identification.csv)
+        avatars: dict speaker_name -> BGR image (loaded from enrollment-avatars/)
     """
     print(f"\nReading video: {video_path}")
     reader = imageio.get_reader(video_path)
@@ -1258,12 +1538,31 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
         frame_bgr = draw_dashboard(frame_bgr, frame_idx, face_count, face_distances, timestamp, audio_data, vad_data)
         
         # Draw facial landmarks for all detected faces (with V-VAD coloring)
+        # face_distances keys are track IDs present this frame
         if show_markers and face_count > 0:
-            for face_idx in range(face_count):
+            for face_idx in sorted(face_distances.keys()):
                 frame_bgr = draw_facial_landmarks(
                     frame_bgr, df_mouth, timestamp, face_idx,
                     frontalize=True, vvad_detector=vvad_detector
                 )
+        
+        # Draw speaker avatars above identified faces
+        if speaker_lookup and avatars and face_count > 0:
+            ts_key = round(timestamp, 6)
+            for face_idx in sorted(face_distances.keys()):
+                speaker = speaker_lookup.get((ts_key, face_idx))
+                if not speaker or speaker == 'unknown':
+                    continue
+                if speaker not in avatars:
+                    continue
+                face_lm = df_mouth[
+                    (df_mouth['seconds'].round(6) == ts_key) &
+                    (df_mouth['face_idx'] == face_idx)
+                ]
+                if not face_lm.empty:
+                    frame_bgr = draw_speaker_avatar(
+                        frame_bgr, avatars[speaker], face_lm
+                    )
         
         # Convert back to RGB for imageio
         frame_rgb = frame_bgr[..., ::-1]
@@ -1294,7 +1593,7 @@ def main(args):
         return
     
     print("="*60)
-    print("Multi-Face Distance Video Renderer")
+    print("Multi-Face Distance Video Renderer (with Speaker Avatars)")
     print("="*60)
     
     # Read CSV files
@@ -1321,10 +1620,51 @@ def main(args):
         print(f"  No VAD data found (optional)")
     
     print(f"  Loaded {len(df_face_count)} frames")
-    
-    unique_faces = sorted(df_mouth['face_idx'].unique())
-    print(f"  Found {len(unique_faces)} unique face indices: {unique_faces}")
-    
+
+    # Load speaker identification data
+    speaker_lookup = None
+    speaker_id_path = dumps_dir / 'speaker_identification.csv'
+    if speaker_id_path.exists():
+        ref_seconds = np.sort(df_face_count['seconds'].values)
+        speaker_lookup = load_speaker_identification(speaker_id_path,
+                                                     reference_seconds=ref_seconds)
+        speakers_found = set(v for v in speaker_lookup.values() if v != 'unknown')
+        print(f"  Loaded speaker identification: {len(speaker_lookup)} entries, "
+              f"speakers: {sorted(speakers_found)}")
+    else:
+        print(f"  No speaker identification data found (optional)")
+
+    # Load avatar images
+    avatars_dir = Path(args.avatars_dir)
+    avatars = load_avatars(avatars_dir)
+    if avatars:
+        print(f"  Loaded {len(avatars)} avatar(s): {sorted(avatars.keys())}")
+    else:
+        print(f"  No avatar images loaded from {avatars_dir}")
+
+    # Optionally assign stable track IDs from face recognition embeddings
+    if getattr(args, 'embeddings', None):
+        emb_path = Path(args.embeddings)
+        if not emb_path.exists():
+            print(f"  Error: Embeddings file not found: {emb_path}")
+            return
+        print(f"  Loading face embeddings from {emb_path}...")
+        embeddings, seconds_arr, face_idx_arr = load_embeddings_npz(emb_path)
+        print(f"  Computing face track IDs from embeddings (similarity matching)...")
+        assignment_map = compute_face_track_ids_from_embeddings(
+            embeddings, seconds_arr, face_idx_arr, df_face_count,
+            similarity_threshold=getattr(args, 'embedding_threshold', 0.3),
+            drop_after_frames=getattr(args, 'embedding_drop_frames', 60)
+        )
+        df_mouth = reindex_mouth_by_track_id(df_mouth, assignment_map)
+        if speaker_lookup:
+            speaker_lookup = reindex_speaker_lookup(speaker_lookup, assignment_map)
+        unique_faces = sorted(df_mouth['face_idx'].unique())
+        print(f"  Found {len(unique_faces)} stable track IDs: {unique_faces}")
+    else:
+        unique_faces = sorted(df_mouth['face_idx'].unique())
+        print(f"  Using raw face indices (no embeddings provided)")
+
     # Render video
     render_video_with_dashboard(
         video_path, 
@@ -1333,7 +1673,9 @@ def main(args):
         df_mqe,
         df_vad,
         output_path,
-        show_markers=args.show_markers
+        show_markers=args.show_markers,
+        speaker_lookup=speaker_lookup,
+        avatars=avatars
     )
     
     print("\n" + "="*60)
@@ -1343,22 +1685,26 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description='Render video with face distance dashboard overlay',
+        description='Render video with face distance dashboard overlay and speaker avatars',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic usage
-  python3 multiface_distance_render.py -i inputs/video.mp4 -o output_annotated.mp4
+  # Basic usage (avatars loaded automatically from enrollment-avatars/)
+  python3 multiface_avatar_render.py -i inputs/video.mp4 -o output_annotated.mp4
 
-  # Specify custom dumps directory
-  python3 multiface_distance_render.py -i video.mp4 -o output.mp4 --dumps_dir=dumps
+  # Specify custom dumps directory and avatars directory
+  python3 multiface_avatar_render.py -i video.mp4 -o output.mp4 --dumps_dir=dumps --avatars-dir=enrollment-avatars
 
   # Without face position markers
-  python3 multiface_distance_render.py -i video.mp4 -o output.mp4 --no-markers
+  python3 multiface_avatar_render.py -i video.mp4 -o output.mp4 --no-markers
+
+  # With face identity from precomputed embeddings
+  python3 multiface_avatar_render.py -i video.mp4 -o output.mp4 --embeddings dumps/face_embeddings.npz
 
 Output:
   Creates an MP4 video with:
   - Dashboard panel showing frame info, face count, distances
+  - Speaker avatar overlays above identified faces
   - Optional face position markers
   - Color-coded per face
   - Distance in cm (calculated as 100/z)
@@ -1371,11 +1717,19 @@ Output:
                        help='Output video file path')
     parser.add_argument('--dumps_dir', type=str, default='dumps',
                        help='Directory containing CSV dump files (default: dumps)')
+    parser.add_argument('--avatars-dir', type=str, default='enrollment-avatars',
+                       help='Directory containing speaker avatar images (default: enrollment-avatars)')
     parser.add_argument('--show-markers', dest='show_markers', action='store_true',
                        help='Show face position markers on video (default)')
     parser.add_argument('--no-markers', dest='show_markers', action='store_false',
                        help='Hide face position markers')
+    parser.add_argument('--embeddings', type=str, default=None,
+                       help='Path to .npz with precomputed face embeddings (keys: embeddings, seconds, face_idx) for stable identity')
+    parser.add_argument('--embedding-threshold', type=float, default=0.3,
+                       help='Min cosine similarity to match face to existing track (default: 0.3)')
+    parser.add_argument('--embedding-drop-frames', type=int, default=60,
+                       help='Drop track after this many frames unseen (default: 60)')
     parser.set_defaults(show_markers=True)
-    
+
     args = parser.parse_args()
     main(args)

@@ -1,0 +1,51 @@
+#! /bin/bash
+
+# Before running the script, you need to:
+# 1. Set the paths below (make sure they are absolute paths)
+# 2. Prepare all the repositories, including audio processing pipeline
+
+# Set up variables (absolute paths)
+TDDFA_V2_DIRECTORY_PATH="$(pwd)/"
+VIDEO_PATH="$(pwd)/inputs/example_1.mp4"
+AUDIO_PIPELINE_DIRECTORY_PATH="/work/user_data/hboratyn/repos/leapfox/"
+FACENET_DIRECTORY_PATH="/work/user_data/hboratyn/repos/facenet/"
+
+# Obtain audio from video and save to the same directory
+python3 extract_wav_from_video.py -i "$VIDEO_PATH"
+
+# Run audio pipeline
+echo "Please run the required library for the audio pipeline now. Type 'done' and press Enter when finished to continue."
+while true; do
+    read -p "Type 'done' when complete: " user_input
+    if [ "$user_input" = "done" ]; then
+        break
+    else
+        echo "Waiting for confirmation... (type 'done' to continue)"
+    fi
+done
+
+# Copy the dumps obtained from the audio pipeline
+cp "$AUDIO_PIPELINE_DIRECTORY_PATH/"{vad,MQE_Metrics}".csv" dumps/
+
+# Obtain video information from 3DDFA_V2
+source 3ddfa-venv/bin/activate
+python3 process_video.py -f "$VIDEO_PATH" --dump_results=true
+deactivate
+
+# Obtain face embeddings from the video
+cd "$FACENET_DIRECTORY_PATH"
+source facenet-venv/bin/activate
+./run_identify_speakers.sh models/20180402-114759 "$VIDEO_PATH" "$TDDFA_V2_DIRECTORY_PATH/enrollment-avatars/" --threshold 0.5 -o "$TDDFA_V2_DIRECTORY_PATH/dumps/speaker_identification.csv" -m "$TDDFA_V2_DIRECTORY_PATH/dumps/mouth_position.csv"
+deactivate
+
+
+# Render the video with all the information
+cd "$TDDFA_V2_DIRECTORY_PATH"
+source 3ddfa-venv/bin/activate
+# Extract face embeddings pre-render
+python3 extract_face_embeddings.py -i "$VIDEO_PATH" --dumps_dir dumps -o face_embeddings.npz
+
+OUTPUT_NAME="outputs/$(basename "${VIDEO_PATH%.*}")_output.${VIDEO_PATH##*.}"
+python3 multiface_distance_render.py -i "$VIDEO_PATH" -o "$OUTPUT_NAME" --dumps_dir dumps --embeddings face_embeddings.npz
+deactivate
+echo "Done!"
