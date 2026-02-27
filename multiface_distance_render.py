@@ -14,9 +14,11 @@ import cv2
 import imageio
 from pathlib import Path
 from tqdm import tqdm
-from collections import deque
+from collections import deque, OrderedDict
 import subprocess
 import os
+import torch
+import torch.nn as nn
 
 # Color scheme for different faces (BGR format for OpenCV)
 FACE_COLORS_BGR = [
@@ -526,6 +528,233 @@ class VisualVADDetector:
             self._smoothed_prob.clear()
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# DNN-based Visual Voice Activity Detector
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class VVAD_DNN(nn.Module):
+    """
+    Feedforward DNN for Visual Voice Activity Detection.
+
+    Architecture must match the training script (train_vvad_dnn.py) exactly
+    so that checkpoint weights can be loaded.
+    """
+
+    def __init__(self, input_dim, hidden_dims=None, dropout=0.3):
+        super().__init__()
+        if hidden_dims is None:
+            hidden_dims = [256, 128]
+        layers = []
+        prev_dim = input_dim
+        for i, h_dim in enumerate(hidden_dims):
+            layers.append((f'fc{i+1}', nn.Linear(prev_dim, h_dim)))
+            layers.append((f'bn{i+1}', nn.BatchNorm1d(h_dim)))
+            layers.append((f'relu{i+1}', nn.ReLU()))
+            layers.append((f'drop{i+1}', nn.Dropout(dropout)))
+            prev_dim = h_dim
+        layers.append(('fc_out', nn.Linear(prev_dim, 1)))
+        self.network = nn.Sequential(OrderedDict(layers))
+
+    def forward(self, x):
+        return self.network(x).squeeze(-1)
+
+
+class DNN_VVAD_Detector:
+    """
+    DNN-based Visual Voice Activity Detector.
+
+    Uses a trained feedforward neural network that takes frontalized and
+    scale-normalized facial landmark coordinates from a sliding window of
+    consecutive frames to predict whether a speaker is actively speaking.
+
+    Preprocessing (identical to training pipeline):
+        1. Face frontalization (derotation via stable reference landmarks)
+        2. Centering (midpoint of eye centers as origin)
+        3. Scale normalization (÷ inter-ocular distance)
+        4. Z-score standardization (using training-set statistics from checkpoint)
+
+    Features per sample:
+        • Absolute positions:   window_size × 68 landmarks × 2 (x, y)
+        • Frame-to-frame deltas: (window_size - 1) × 68 × 2
+
+    Hysteresis:
+        Once the detector transitions to ACTIVE (speaking), it maintains that
+        state for at least `hold_seconds` to prevent flickering.
+
+    Args:
+        checkpoint_path: Path to the trained .pt model checkpoint.
+        device: torch.device (auto-detected if None).
+        hold_seconds: Minimum time to sustain ACTIVE state after last positive detection.
+        fps: Video frame rate (used to convert hold_seconds to frames).
+    """
+
+    NUM_LANDMARKS = 68
+
+    def __init__(self, checkpoint_path, device=None, hold_seconds=1.0, fps=30.0):
+        if device is None:
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        else:
+            self.device = device
+
+        # Load checkpoint
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        cfg = checkpoint['config']
+
+        self.window_size = cfg['window_size']
+        self.num_landmarks = cfg['num_landmarks']
+
+        # Standardization parameters (fit on training set)
+        std_params = checkpoint['standardization']
+        self.feat_mean = torch.FloatTensor(np.array(std_params['mean'])).to(self.device)
+        self.feat_std = torch.FloatTensor(np.array(std_params['std'])).to(self.device)
+        self.feat_std[self.feat_std < 1e-8] = 1.0  # avoid division by zero
+
+        # Build and load model
+        self.model = VVAD_DNN(
+            input_dim=cfg['input_dim'],
+            hidden_dims=cfg['hidden_dims'],
+            dropout=cfg['dropout'],
+        ).to(self.device)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.model.eval()
+
+        # Per-face sliding windows and hysteresis state
+        self._landmark_windows = {}   # {face_idx: deque of (68, 2) arrays}
+        self._hold_counter = {}       # {face_idx: int}
+        self._smoothed_prob = {}      # {face_idx: float}
+
+        self.hold_frames = max(1, int(hold_seconds * fps))
+        self._decay = 1.0 - (1.0 / max(1, self.hold_frames))
+
+        print(f"  DNN V-VAD loaded from: {checkpoint_path}")
+        print(f"    Window size:   {self.window_size} frames")
+        print(f"    Input dim:     {cfg['input_dim']}")
+        print(f"    Hidden layers: {cfg['hidden_dims']}")
+        print(f"    Model epoch:   {checkpoint.get('epoch', '?')}")
+        print(f"    Val F1:        {checkpoint.get('val_f1', '?'):.4f}")
+
+    @staticmethod
+    def _frontalize_and_normalize(pts_x, pts_y, pts_z):
+        """
+        Frontalize and normalize all 68 facial landmarks.
+        Identical to the preprocessing in train_vvad_dnn.py.
+
+        Returns (68, 2) numpy array of normalized (x, y) or None on failure.
+        """
+        pts_3d = np.column_stack([pts_x, pts_y, pts_z])
+
+        left_eye_center = (pts_3d[36] + pts_3d[39]) / 2.0
+        right_eye_center = (pts_3d[42] + pts_3d[45]) / 2.0
+
+        x_axis = right_eye_center - left_eye_center
+        inter_ocular_dist = np.linalg.norm(x_axis)
+        if inter_ocular_dist < 1e-8:
+            return None
+        x_axis = x_axis / inter_ocular_dist
+
+        y_approx = pts_3d[8] - pts_3d[27]
+        z_axis = np.cross(x_axis, y_approx)
+        z_norm = np.linalg.norm(z_axis)
+        if z_norm < 1e-8:
+            return None
+        z_axis = z_axis / z_norm
+
+        y_axis = np.cross(z_axis, x_axis)
+        y_axis = y_axis / np.linalg.norm(y_axis)
+
+        R_inv = np.array([x_axis, y_axis, z_axis])
+        face_center = (left_eye_center + right_eye_center) / 2.0
+
+        centered = pts_3d - face_center
+        derotated = (R_inv @ centered.T).T
+        normalized_xy = derotated[:, :2] / inter_ocular_dist
+
+        return normalized_xy  # shape (68, 2)
+
+    def update(self, face_idx, points_3d):
+        """
+        Process one frame of landmarks and return speech activity prediction.
+
+        Args:
+            face_idx: Index of the face.
+            points_3d: dict {pt_idx: (x, y, z)} for all available facial landmarks.
+
+        Returns:
+            tuple (is_active, probability, smoothed_probability)
+        """
+        if face_idx not in self._landmark_windows:
+            self._landmark_windows[face_idx] = deque(maxlen=self.window_size)
+            self._hold_counter[face_idx] = 0
+            self._smoothed_prob[face_idx] = 0.0
+
+        # Must have all 68 landmarks
+        if len(points_3d) < self.NUM_LANDMARKS:
+            return False, 0.0, self._smoothed_prob.get(face_idx, 0.0)
+
+        pts_x = np.array([points_3d[i][0] for i in range(self.NUM_LANDMARKS)], dtype=np.float64)
+        pts_y = np.array([points_3d[i][1] for i in range(self.NUM_LANDMARKS)], dtype=np.float64)
+        pts_z = np.array([points_3d[i][2] for i in range(self.NUM_LANDMARKS)], dtype=np.float64)
+
+        normalized = self._frontalize_and_normalize(pts_x, pts_y, pts_z)
+        if normalized is None:
+            return False, 0.0, self._smoothed_prob.get(face_idx, 0.0)
+
+        self._landmark_windows[face_idx].append(normalized)
+
+        # Need a full window for prediction
+        window = self._landmark_windows[face_idx]
+        probability = 0.0
+        raw_speaking = False
+
+        if len(window) == self.window_size:
+            frames = list(window)
+
+            # Absolute positions: each frame (68, 2) → flatten
+            abs_feats = np.concatenate([f.flatten() for f in frames])
+
+            # Frame-to-frame deltas
+            deltas = []
+            for j in range(1, len(frames)):
+                deltas.append((frames[j] - frames[j - 1]).flatten())
+            delta_feats = np.concatenate(deltas)
+
+            feat_vector = np.concatenate([abs_feats, delta_feats]).astype(np.float32)
+
+            # Standardize and run inference
+            feat_tensor = torch.FloatTensor(feat_vector).unsqueeze(0).to(self.device)
+            feat_tensor = (feat_tensor - self.feat_mean) / self.feat_std
+
+            with torch.no_grad():
+                logit = self.model(feat_tensor)
+                probability = float(torch.sigmoid(logit).item())
+                raw_speaking = probability > 0.5
+
+        # Smoothed probability (exponential decay)
+        smoothed = max(probability, self._smoothed_prob[face_idx] * self._decay)
+        self._smoothed_prob[face_idx] = smoothed
+
+        # Hysteresis (hold-time)
+        if raw_speaking:
+            self._hold_counter[face_idx] = self.hold_frames
+        else:
+            if self._hold_counter[face_idx] > 0:
+                self._hold_counter[face_idx] -= 1
+
+        is_active = self._hold_counter[face_idx] > 0
+        return is_active, probability, smoothed
+
+    def reset(self, face_idx=None):
+        """Clear state for a specific face or all faces."""
+        if face_idx is not None:
+            self._landmark_windows.pop(face_idx, None)
+            self._hold_counter.pop(face_idx, None)
+            self._smoothed_prob.pop(face_idx, None)
+        else:
+            self._landmark_windows.clear()
+            self._hold_counter.clear()
+            self._smoothed_prob.clear()
+
+
 def draw_facial_landmarks(frame, landmarks_df, timestamp, face_idx=0,
                           frontalize=True, vvad_detector=None):
     """
@@ -588,9 +817,15 @@ def draw_facial_landmarks(frame, landmarks_df, timestamp, face_idx=0,
     is_speaking = False
     speech_prob = 0.0
     speech_prob_smoothed = 0.0
-    if frontalized_points and vvad_detector is not None:
-        mar = compute_mouth_aspect_ratio(frontalized_points)
-        is_speaking, speech_prob, speech_prob_smoothed = vvad_detector.update(face_idx, mar)
+    if vvad_detector is not None:
+        if isinstance(vvad_detector, DNN_VVAD_Detector):
+            # DNN-based V-VAD: pass all 68 landmark 3D coordinates
+            if len(points_3d) >= 68:
+                is_speaking, speech_prob, speech_prob_smoothed = vvad_detector.update(face_idx, points_3d)
+        elif frontalized_points:
+            # Heuristic MAR-based V-VAD (legacy fallback)
+            mar = compute_mouth_aspect_ratio(frontalized_points)
+            is_speaking, speech_prob, speech_prob_smoothed = vvad_detector.update(face_idx, mar)
     
     # --- Drawing ---
     point_radius = 2
@@ -1153,7 +1388,7 @@ def copy_audio_with_ffmpeg(input_video, temp_video, final_output):
         return False
 
 
-def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_vad, output_path, show_markers=True):
+def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_vad, output_path, show_markers=True, vvad_model_path=None):
     """
     Render annotated video with dashboard overlay
     
@@ -1191,10 +1426,17 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
     
     print("\nRendering annotated video...")
     
-    # Initialize Visual VAD detector for mouth activity detection
-    vvad_detector = VisualVADDetector(window_seconds=0.3, fps=fps,
-                                      var_threshold=0.002, mar_activity_threshold=0.15,
-                                      hold_seconds=1.0, min_zcr=3)
+    # Initialize Visual VAD detector
+    if vvad_model_path and os.path.exists(vvad_model_path):
+        print(f"  Loading DNN-based V-VAD model...")
+        vvad_detector = DNN_VVAD_Detector(vvad_model_path, hold_seconds=1.0, fps=fps)
+    else:
+        if vvad_model_path:
+            print(f"  ⚠ DNN model not found at '{vvad_model_path}', falling back to MAR heuristic")
+        print(f"  Using heuristic MAR-based V-VAD")
+        vvad_detector = VisualVADDetector(window_seconds=0.3, fps=fps,
+                                          var_threshold=0.002, mar_activity_threshold=0.15,
+                                          hold_seconds=1.0, min_zcr=3)
     
     # Store last valid audio data to persist after MQE data ends
     last_audio_data = None
@@ -1404,7 +1646,8 @@ def main(args):
         df_mqe,
         df_vad,
         output_path,
-        show_markers=args.show_markers
+        show_markers=args.show_markers,
+        vvad_model_path=args.vvad_model,
     )
     
     print("\n" + "="*60)
@@ -1442,6 +1685,10 @@ Output:
                        help='Output video file path')
     parser.add_argument('--dumps_dir', type=str, default='dumps',
                        help='Directory containing CSV dump files (default: dumps)')
+    parser.add_argument('--vvad_model', type=str, default='vvad_dnn_model.pt',
+                       help='Path to trained V-VAD DNN model checkpoint '
+                            '(default: vvad_dnn_model.pt). '
+                            'Falls back to MAR heuristic if file not found.')
     parser.add_argument('--show-markers', dest='show_markers', action='store_true',
                        help='Show face position markers on video (default)')
     parser.add_argument('--no-markers', dest='show_markers', action='store_false',

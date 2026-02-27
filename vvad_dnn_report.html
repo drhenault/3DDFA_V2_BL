@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>V-VAD DNN &mdash; Training Report</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.1.0/dist/chartjs-plugin-annotation.min.js"></script>
+<style>
+:root {
+    --bg: #f5f7fa; --card: #fff; --border: #e1e5eb;
+    --primary: #2563eb; --primary-light: #dbeafe;
+    --accent: #f59e0b; --accent2: #10b981;
+    --text: #1e293b; --text2: #64748b;
+    --danger: #ef4444; --success: #22c55e;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg); color: var(--text);
+    line-height: 1.6; padding: 2rem 1rem;
+}
+.container { max-width: 1100px; margin: 0 auto; }
+h1 { font-size: 2rem; color: var(--primary); margin-bottom: .25rem; }
+h1 small { font-size: .9rem; color: var(--text2); font-weight: 400; }
+h2 {
+    font-size: 1.35rem; margin: 2.5rem 0 1rem;
+    padding-bottom: .4rem; border-bottom: 2px solid var(--primary);
+    color: var(--primary);
+}
+h3 { font-size: 1.05rem; margin: 1.2rem 0 .5rem; color: var(--text); }
+
+.card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 1.5rem; margin-bottom: 1.5rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,.06);
+}
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+.grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem; }
+@media (max-width: 768px) { .grid2, .grid3 { grid-template-columns: 1fr; } }
+
+.kpi { text-align: center; padding: 1rem; }
+.kpi .value { font-size: 2rem; font-weight: 700; color: var(--primary); }
+.kpi .label { font-size: .8rem; color: var(--text2); text-transform: uppercase; letter-spacing: .05em; }
+.kpi.good .value { color: var(--accent2); }
+.kpi.warn .value { color: var(--accent); }
+.kpi.bad .value { color: var(--danger); }
+
+table {
+    width: 100%; border-collapse: collapse; font-size: .88rem;
+}
+th, td {
+    padding: .55rem .75rem; text-align: left;
+    border-bottom: 1px solid var(--border);
+}
+th { background: var(--primary-light); color: var(--primary); font-weight: 600; }
+tr:hover { background: #f8fafc; }
+
+.badge {
+    display: inline-block; padding: 2px 10px; border-radius: 12px;
+    font-size: .75rem; font-weight: 600;
+}
+.badge-train { background: #dbeafe; color: #1d4ed8; }
+.badge-val { background: #fef3c7; color: #b45309; }
+.badge-test { background: #d1fae5; color: #065f46; }
+
+/* Architecture diagram */
+.arch-diagram { display: flex; flex-direction: column; align-items: center; gap: .15rem; padding: 1.5rem 0; }
+.layer { text-align: center; }
+.layer-box {
+    display: inline-block; padding: .6rem 1.6rem; border-radius: 8px;
+    font-weight: 600; font-size: .9rem; min-width: 260px;
+}
+.layer-box.input { background: #dbeafe; color: #1e40af; border: 2px solid #93c5fd; }
+.layer-box.hidden { background: #fef3c7; color: #92400e; border: 2px solid #fcd34d; }
+.layer-box.output { background: #d1fae5; color: #065f46; border: 2px solid #6ee7b7; }
+.layer-details { font-size: .78rem; color: var(--text2); margin-top: 2px; }
+.arrow { font-size: 1.2rem; color: var(--text2); line-height: 1; }
+
+/* Confusion matrix */
+.cm-table { max-width: 360px; margin: 0 auto; }
+.cm-table td { text-align: center; font-weight: 600; font-size: 1.1rem; width: 120px; height: 60px; }
+.cm-table .cm-tn { background: #dcfce7; color: #166534; }
+.cm-table .cm-tp { background: #dbeafe; color: #1e40af; }
+.cm-table .cm-fp { background: #fee2e2; color: #991b1b; }
+.cm-table .cm-fn { background: #fef9c3; color: #854d0e; }
+.cm-table th { background: none; color: var(--text2); font-weight: 500; font-size: .8rem; text-align: center; }
+
+.chart-container { position: relative; height: 340px; }
+
+.pipeline-step {
+    display: flex; align-items: flex-start; gap: 1rem; margin-bottom: 1rem;
+}
+.pipeline-num {
+    flex-shrink: 0; width: 32px; height: 32px; border-radius: 50%;
+    background: var(--primary); color: #fff; display: flex;
+    align-items: center; justify-content: center; font-weight: 700; font-size: .85rem;
+}
+.pipeline-text { flex: 1; }
+.pipeline-text strong { color: var(--primary); }
+
+code { background: #f1f5f9; padding: 1px 6px; border-radius: 4px; font-size: .85em; }
+.mono { font-family: 'Cascadia Code', 'Fira Code', monospace; }
+
+footer { text-align: center; margin-top: 3rem; color: var(--text2); font-size: .8rem; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<!-- ════════════════════ HEADER ════════════════════ -->
+<h1>V-VAD DNN Training Report <br><small>Visual Voice Activity Detection using Facial Landmarks</small></h1>
+
+<!-- ════════════════════ OVERVIEW ════════════════════ -->
+<h2>1. Overview</h2>
+<div class="card">
+<p>
+This report documents the training and evaluation of a <strong>feedforward Deep Neural Network (DNN)</strong>
+for <strong>Visual Voice Activity Detection (V-VAD)</strong>. The model predicts whether a speaker is actively
+speaking in a given video frame based solely on the movement of their <strong>68 facial landmarks</strong>.
+</p>
+<p style="margin-top:.7rem;">
+The ground-truth labels are derived from audio-based Voice Activity Detection (VAD) decisions
+aligned to video frames at <strong>30 FPS</strong>.
+A sliding window of <strong>5 consecutive frames</strong> provides temporal context,
+and both absolute landmark positions and frame-to-frame deltas are used as features.
+</p>
+
+</div>
+
+<div class="grid3">
+    <div class="card kpi"><div class="value">42</div><div class="label">Recordings</div></div>
+    <div class="card kpi"><div class="value">35,636</div><div class="label">Total Samples</div></div>
+    <div class="card kpi"><div class="value">41.4%</div><div class="label">Active (Speaking)</div></div>
+</div>
+
+<!-- ════════════════════ PREPROCESSING ════════════════════ -->
+<h2>2. Preprocessing Pipeline</h2>
+<div class="card">
+<p>Every frame undergoes the following four-stage preprocessing pipeline before features are extracted.
+The goal is to remove variation caused by head pose and distance from the camera, isolating only
+the information related to facial articulation (mouth movement).</p>
+
+<div style="margin-top:1.2rem;">
+    <div class="pipeline-step">
+        <div class="pipeline-num">1</div>
+        <div class="pipeline-text">
+            <strong>Face Frontalization (Derotation)</strong><br>
+            A face-aligned coordinate system is constructed from stable reference landmarks:
+            eye corners (points 36, 39, 42, 45), nose bridge (27), and chin (8).
+            The X-axis runs between the eye centers, the Y-axis from nose to chin, and
+            the Z-axis is the face normal. The inverse rotation matrix is applied to all
+            68 landmarks, effectively removing head rotation (yaw, pitch, roll).
+        </div>
+    </div>
+    <div class="pipeline-step">
+        <div class="pipeline-num">2</div>
+        <div class="pipeline-text">
+            <strong>Centering</strong><br>
+            All landmarks are translated so that the midpoint between the two eye centers
+            becomes the origin. This removes translational variation.
+        </div>
+    </div>
+    <div class="pipeline-step">
+        <div class="pipeline-num">3</div>
+        <div class="pipeline-text">
+            <strong>Scale Normalization</strong><br>
+            All coordinates are divided by the inter-ocular distance (distance between
+            the left and right eye centers). This makes the representation invariant to
+            the speaker's distance from the camera.
+        </div>
+    </div>
+    <div class="pipeline-step">
+        <div class="pipeline-num">4</div>
+        <div class="pipeline-text">
+            <strong>Z-Score Standardization</strong><br>
+            After all geometric normalization, the full feature vector is standardized
+            (zero mean, unit variance) using statistics computed on the <em>training set only</em>. The same mean and standard deviation are applied to validation and test data.
+        </div>
+    </div>
+</div>
+</div>
+
+<!-- ════════════════════ FEATURES ════════════════════ -->
+<h2>3. Feature Engineering</h2>
+<div class="card">
+<p>For each sample, a sliding window of <strong>5 consecutive frames</strong>
+is used. Two types of features are extracted:</p>
+
+<h3>Absolute Landmark Positions</h3>
+<p>The frontalized and normalized (x, y) coordinates of all 68 landmarks for each frame in the window.<br>
+<code>5 frames &times; 68 landmarks &times; 2 coords = 680 values</code></p>
+
+<h3>Frame-to-Frame Deltas (Movement Features)</h3>
+<p>The difference in coordinates between each pair of consecutive frames in the window.
+These capture the <em>motion</em> of facial landmarks, which is the primary signal for speech detection.<br>
+<code>(5&minus;1) frames &times; 68 landmarks &times; 2 coords = 544 values</code></p>
+
+<h3 style="margin-top:1rem;">Total Input Dimension</h3>
+<p><code>680 + 544 = <strong>1224</strong> features per sample</code></p>
+</div>
+
+<!-- ════════════════════ ARCHITECTURE ════════════════════ -->
+<h2>4. Model Architecture</h2>
+<div class="card">
+<p>The model is a fully-connected feedforward DNN with 3 hidden layers.
+Each hidden layer uses Batch Normalization, ReLU activation, and Dropout for regularization.
+The output is a single logit, trained with <code>BCEWithLogitsLoss</code>.</p>
+
+<div class="arch-diagram">
+    <div class="layer">
+        <div class="layer-box input">Input (1224 features)</div>
+        <div class="layer-details">5f &times; 68 landmarks &times; 2 coords &nbsp;+&nbsp; 4f &times; 68 &times; 2 deltas</div>
+    </div>
+    <div class="arrow">&darr;</div>
+    
+            <div class="layer">
+                <div class="layer-box hidden">FC-1  (1224 &rarr; 256)</div>
+                <div class="layer-details">BatchNorm &rarr; ReLU &rarr; Dropout(0.3)</div>
+            </div>
+            <div class="arrow">&darr;</div>
+            <div class="layer">
+                <div class="layer-box hidden">FC-2  (256 &rarr; 128)</div>
+                <div class="layer-details">BatchNorm &rarr; ReLU &rarr; Dropout(0.3)</div>
+            </div>
+            <div class="arrow">&darr;</div>
+            <div class="layer">
+                <div class="layer-box hidden">FC-3  (128 &rarr; 64)</div>
+                <div class="layer-details">BatchNorm &rarr; ReLU &rarr; Dropout(0.3)</div>
+            </div>
+            <div class="arrow">&darr;</div>
+    <div class="layer">
+        <div class="layer-box output">Output (1 logit &rarr; sigmoid)</div>
+        <div class="layer-details">Binary: Speaking / Silent</div>
+    </div>
+</div>
+
+<div class="grid3">
+    <div class="card kpi"><div class="value">355,713</div><div class="label">Trainable Parameters</div></div>
+    <div class="card kpi"><div class="value">0.3</div><div class="label">Dropout Rate</div></div>
+    <div class="card kpi"><div class="value">1.408</div><div class="label">Pos Weight (class balance)</div></div>
+</div>
+
+<h3>Computational Complexity</h3>
+<p>Multiply-Accumulate (MAC) operations per single inference pass through the network.
+One MAC equals one multiplication plus one addition (2 FLOPs).
+The model processes one frame every 33.3&thinsp;ms at 30&thinsp;FPS.</p>
+
+<div class="grid3" style="margin-top:1rem;">
+    <div class="card kpi"><div class="value">0.3544</div><div class="label">MMACs / inference</div></div>
+    <div class="card kpi"><div class="value">10.63</div><div class="label">MMACs / second @30 FPS</div></div>
+    <div class="card kpi"><div class="value">0.7087</div><div class="label">MFLOPs / inference</div></div>
+</div>
+
+<table style="margin-top:1rem;">
+<tr><th>Layer</th><th>Dimensions</th><th>MACs</th><th>MMACs</th></tr>
+<tr>
+            <td>FC-1 + BN + ReLU</td>
+            <td>1,224 &rarr; 256</td>
+            <td>313,344</td>
+            <td>313.3 K</td>
+        </tr>
+<tr>
+            <td>FC-2 + BN + ReLU</td>
+            <td>256 &rarr; 128</td>
+            <td>32,768</td>
+            <td>32.8 K</td>
+        </tr>
+<tr>
+            <td>FC-3 + BN + ReLU</td>
+            <td>128 &rarr; 64</td>
+            <td>8,192</td>
+            <td>8.2 K</td>
+        </tr>
+<tr>
+        <td>FC-out</td>
+        <td>64 &rarr; 1</td>
+        <td>64</td>
+        <td>0.1 K</td>
+    </tr>
+<tr style="font-weight:700; border-top:2px solid var(--primary);">
+        <td>Total</td>
+        <td></td>
+        <td>354,368</td>
+        <td>0.3544 M</td>
+    </tr>
+
+</table>
+
+<p style="margin-top:.8rem; font-size:.85rem; color: var(--text2);">
+<strong>Note:</strong> The above counts cover only the linear (fully-connected) layers, which dominate
+the computation. BatchNorm, ReLU, and Dropout add negligible overhead
+(&lt;&thinsp;1% of total). At 10.63&thinsp;MMACs/s the model is extremely lightweight
+and suitable for real-time inference on embedded or mobile hardware.
+</p>
+</div>
+
+<!-- ════════════════════ TRAINING CONFIG ════════════════════ -->
+<h2>5. Training Configuration</h2>
+<div class="card">
+<table>
+<tr><th>Parameter</th><th>Value</th></tr>
+<tr><td>Optimizer</td><td>Adam (weight_decay=0.0001)</td></tr>
+<tr><td>Initial Learning Rate</td><td>0.001</td></tr>
+<tr><td>LR Scheduler</td><td>ReduceLROnPlateau (factor=0.5, patience=10)</td></tr>
+<tr><td>Batch Size</td><td>64</td></tr>
+<tr><td>Loss Function</td><td>BCEWithLogitsLoss (pos_weight=1.408)</td></tr>
+<tr><td>Epochs Trained</td><td>58 (best&nbsp;at&nbsp;epoch&nbsp;33)</td></tr>
+<tr><td>Early Stopping</td><td>Patience = 25 epochs</td></tr>
+<tr><td>Data Split</td><td>Stratified by-recording (train/val/test)</td></tr>
+<tr><td>Random Seed</td><td>42</td></tr>
+<tr><td>Device</td><td>cuda</td></tr>
+<tr><td>Training Time</td><td>194.8 seconds (3.2 min)</td></tr>
+</table>
+</div>
+
+<!-- ════════════════════ DATA SPLIT / USAGE ════════════════════ -->
+<h2>6. Data Split</h2>
+<div class="card">
+<p>Data is split <strong>by recording</strong> (not by frame) to prevent data leakage. Recordings are stratified by their activity ratio so that each split has a similar distribution of speaking vs.&nbsp;silent content.</p>
+
+<div class="grid3">
+    <div class="card kpi"><div class="value">26,527</div><div class="label">Train Samples (30 rec, 41.5% active)</div></div>
+    <div class="card kpi"><div class="value">5,371</div><div class="label">Val Samples (6 rec, 26.3% active)</div></div>
+    <div class="card kpi"><div class="value">3,738</div><div class="label">Test Samples (6 rec, 62.0% active)</div></div>
+</div>
+
+<h3>Per-Recording Breakdown</h3>
+<table>
+<tr><th>Recording</th><th>Samples</th><th>Active</th><th>Active %</th><th>Split</th></tr>
+<tr>
+            <td>data_train1</td>
+            <td>784</td>
+            <td>574</td>
+            <td>73.2%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train10</td>
+            <td>517</td>
+            <td>90</td>
+            <td>17.4%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train11</td>
+            <td>358</td>
+            <td>157</td>
+            <td>43.9%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train12</td>
+            <td>342</td>
+            <td>142</td>
+            <td>41.5%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train13</td>
+            <td>482</td>
+            <td>167</td>
+            <td>34.6%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train14</td>
+            <td>302</td>
+            <td>99</td>
+            <td>32.8%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train15</td>
+            <td>406</td>
+            <td>118</td>
+            <td>29.1%</td>
+            <td><span class="badge badge-val">Val</span></td>
+        </tr>
+<tr>
+            <td>data_train16</td>
+            <td>226</td>
+            <td>116</td>
+            <td>51.3%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train17</td>
+            <td>287</td>
+            <td>71</td>
+            <td>24.7%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train18</td>
+            <td>193</td>
+            <td>74</td>
+            <td>38.3%</td>
+            <td><span class="badge badge-test">Test</span></td>
+        </tr>
+<tr>
+            <td>data_train19</td>
+            <td>213</td>
+            <td>73</td>
+            <td>34.3%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train2</td>
+            <td>1,059</td>
+            <td>749</td>
+            <td>70.7%</td>
+            <td><span class="badge badge-val">Val</span></td>
+        </tr>
+<tr>
+            <td>data_train20</td>
+            <td>203</td>
+            <td>91</td>
+            <td>44.8%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train21</td>
+            <td>185</td>
+            <td>64</td>
+            <td>34.6%</td>
+            <td><span class="badge badge-val">Val</span></td>
+        </tr>
+<tr>
+            <td>data_train22</td>
+            <td>541</td>
+            <td>348</td>
+            <td>64.3%</td>
+            <td><span class="badge badge-val">Val</span></td>
+        </tr>
+<tr>
+            <td>data_train23</td>
+            <td>476</td>
+            <td>333</td>
+            <td>70.0%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train24</td>
+            <td>549</td>
+            <td>363</td>
+            <td>66.1%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train25</td>
+            <td>486</td>
+            <td>138</td>
+            <td>28.4%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train26</td>
+            <td>505</td>
+            <td>182</td>
+            <td>36.0%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train27</td>
+            <td>499</td>
+            <td>275</td>
+            <td>55.1%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train28</td>
+            <td>395</td>
+            <td>269</td>
+            <td>68.1%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train29</td>
+            <td>1,426</td>
+            <td>671</td>
+            <td>47.0%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train3</td>
+            <td>1,553</td>
+            <td>919</td>
+            <td>59.2%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train30</td>
+            <td>484</td>
+            <td>343</td>
+            <td>70.9%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train31</td>
+            <td>327</td>
+            <td>100</td>
+            <td>30.6%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train32</td>
+            <td>265</td>
+            <td>73</td>
+            <td>27.6%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train33</td>
+            <td>325</td>
+            <td>134</td>
+            <td>41.2%</td>
+            <td><span class="badge badge-val">Val</span></td>
+        </tr>
+<tr>
+            <td>data_train34</td>
+            <td>1,298</td>
+            <td>1,011</td>
+            <td>77.9%</td>
+            <td><span class="badge badge-test">Test</span></td>
+        </tr>
+<tr>
+            <td>data_train35</td>
+            <td>1,447</td>
+            <td>744</td>
+            <td>51.4%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train36</td>
+            <td>750</td>
+            <td>543</td>
+            <td>72.4%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train37</td>
+            <td>1,338</td>
+            <td>858</td>
+            <td>64.1%</td>
+            <td><span class="badge badge-test">Test</span></td>
+        </tr>
+<tr>
+            <td>data_train38</td>
+            <td>1,712</td>
+            <td>0</td>
+            <td>0.0%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train39</td>
+            <td>1,426</td>
+            <td>0</td>
+            <td>0.0%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train4</td>
+            <td>274</td>
+            <td>171</td>
+            <td>62.4%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train40</td>
+            <td>1,619</td>
+            <td>0</td>
+            <td>0.0%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train41</td>
+            <td>2,855</td>
+            <td>0</td>
+            <td>0.0%</td>
+            <td><span class="badge badge-val">Val</span></td>
+        </tr>
+<tr>
+            <td>data_train42</td>
+            <td>3,686</td>
+            <td>1,368</td>
+            <td>37.1%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train5</td>
+            <td>149</td>
+            <td>0</td>
+            <td>0.0%</td>
+            <td><span class="badge badge-test">Test</span></td>
+        </tr>
+<tr>
+            <td>data_train6</td>
+            <td>256</td>
+            <td>124</td>
+            <td>48.4%</td>
+            <td><span class="badge badge-test">Test</span></td>
+        </tr>
+<tr>
+            <td>data_train7</td>
+            <td>4,409</td>
+            <td>2,743</td>
+            <td>62.2%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train8</td>
+            <td>525</td>
+            <td>201</td>
+            <td>38.3%</td>
+            <td><span class="badge badge-train">Train</span></td>
+        </tr>
+<tr>
+            <td>data_train9</td>
+            <td>504</td>
+            <td>251</td>
+            <td>49.8%</td>
+            <td><span class="badge badge-test">Test</span></td>
+        </tr>
+
+</table>
+</div>
+
+<!-- ════════════════════ TRAINING CURVES ════════════════════ -->
+<h2>7. Training Curves</h2>
+<div class="grid2">
+    <div class="card">
+        <h3>Loss</h3>
+        <div class="chart-container"><canvas id="chartLoss"></canvas></div>
+    </div>
+    <div class="card">
+        <h3>Accuracy</h3>
+        <div class="chart-container"><canvas id="chartAcc"></canvas></div>
+    </div>
+</div>
+<div class="grid2">
+    <div class="card">
+        <h3>Val F1 / Precision / Recall</h3>
+        <div class="chart-container"><canvas id="chartF1"></canvas></div>
+    </div>
+    <div class="card">
+        <h3>Learning Rate Schedule</h3>
+        <div class="chart-container"><canvas id="chartLR"></canvas></div>
+    </div>
+</div>
+
+<!-- ════════════════════ RESULTS ════════════════════ -->
+<h2>8. Test Set Results</h2>
+<div class="card">
+<p>The best model (epoch <strong>33</strong> of 58, selected by validation F1) was evaluated on the held-out test set (3,738 samples from 6 recordings). Both the best-epoch and last-epoch checkpoints are saved as <code>.pt</code> files.</p>
+
+<div class="grid3" style="margin-top:1rem;">
+    <div class="card kpi"><div class="value">62.12%</div><div class="label">Accuracy</div></div>
+    <div class="card kpi"><div class="value">67.69%</div><div class="label">F1-Score</div></div>
+    <div class="card kpi"><div class="value">71.85%</div><div class="label">Precision</div></div>
+</div>
+<div class="grid3">
+    <div class="card kpi"><div class="value">63.98%</div><div class="label">Recall</div></div>
+    <div class="card kpi"><div class="value">33</div><div class="label">Best Epoch</div></div>
+    <div class="card kpi"><div class="value">58</div><div class="label">Total Epochs</div></div>
+</div>
+
+<h3>Confusion Matrix</h3>
+<table class="cm-table">
+<tr><th></th><th></th><th colspan="2" style="text-align:center;">Predicted</th></tr>
+<tr><th></th><th></th><th style="text-align:center;">Silent</th><th style="text-align:center;">Speaking</th></tr>
+<tr><th rowspan="2" style="vertical-align:middle;">Actual</th><td><strong>Silent</strong></td>
+    <td class="cm-tn">839</td><td class="cm-fp">581</td></tr>
+<tr><td><strong>Speaking</strong></td>
+    <td class="cm-fn">835</td><td class="cm-tp">1,483</td></tr>
+</table>
+
+<h3 style="margin-top:1.5rem;">Per-Recording Test Results</h3>
+<table>
+<tr><th>Recording</th><th>Samples</th><th>Active</th><th>Accuracy</th><th>Precision</th><th>Recall</th><th>F1</th></tr>
+<tr>
+            <td>data_train5</td>
+            <td>149</td>
+            <td>0</td>
+            <td>1.0000</td>
+            <td>0.0000</td>
+            <td>0.0000</td>
+            <td>0.0000</td>
+        </tr>
+<tr>
+            <td>data_train18</td>
+            <td>193</td>
+            <td>74</td>
+            <td>0.8083</td>
+            <td>0.7342</td>
+            <td>0.7838</td>
+            <td>0.7582</td>
+        </tr>
+<tr>
+            <td>data_train37</td>
+            <td>1,338</td>
+            <td>858</td>
+            <td>0.5807</td>
+            <td>0.6682</td>
+            <td>0.6876</td>
+            <td>0.6778</td>
+        </tr>
+<tr>
+            <td>data_train34</td>
+            <td>1,298</td>
+            <td>1,011</td>
+            <td>0.6294</td>
+            <td>0.8515</td>
+            <td>0.6350</td>
+            <td>0.7275</td>
+        </tr>
+<tr>
+            <td>data_train6</td>
+            <td>256</td>
+            <td>124</td>
+            <td>0.5156</td>
+            <td>0.5000</td>
+            <td>0.9032</td>
+            <td>0.6437</td>
+        </tr>
+<tr>
+            <td>data_train9</td>
+            <td>504</td>
+            <td>251</td>
+            <td>0.5774</td>
+            <td>0.6532</td>
+            <td>0.3227</td>
+            <td>0.4320</td>
+        </tr>
+
+</table>
+</div>
+
+<!-- ════════════════════ DISCUSSION ════════════════════ -->
+<h2>9. Discussion &amp; Notes</h2>
+<div class="card">
+<ul style="margin-left:1.2rem;">
+    <li>The model was trained on <strong>face_idx=0</strong> only (the primary / closest detected face per frame).</li>
+    <li><strong>Data leakage prevention:</strong> The train/val/test split is performed at the recording level, ensuring that frames from the same video never appear in both training and evaluation sets.</li>
+    <li><strong>Class imbalance:</strong> The <code>pos_weight</code> parameter in BCEWithLogitsLoss compensates
+        for the imbalance between speaking and silent frames in the training set.</li>
+    <li><strong>Standardization parameters</strong> (mean and std) are saved inside the model checkpoint
+        (<code>.pt</code> file) to ensure consistent preprocessing at inference time.</li>
+    <li><strong>Delta features</strong> (frame-to-frame landmark movement) are critical for performance &mdash;
+        they capture the temporal dynamics of speech that static positions alone cannot convey.</li>
+    <li>Recordings with <strong>0% activity</strong> (e.g., data_train5, data_train38&ndash;41) represent silence-only
+        segments and are important for training the model to correctly classify non-speech.</li>
+    
+</ul>
+</div>
+
+<footer>
+    Generated from <code>vvad_dnn_training_history.json</code> &mdash; V-VAD DNN Training Pipeline
+</footer>
+
+</div><!-- /container -->
+
+<script>
+// ── Chart Data ──────────────────────────────────────────────────────────────
+const epochs   = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58];
+const tLoss    = [0.709196, 0.663945, 0.648115, 0.62969, 0.61921, 0.610715, 0.599322, 0.592811, 0.581726, 0.58058, 0.570528, 0.569612, 0.564459, 0.564261, 0.559397, 0.557578, 0.556915, 0.549037, 0.538116, 0.526577, 0.52558, 0.522907, 0.519309, 0.514773, 0.521447, 0.520169, 0.512684, 0.508542, 0.50823, 0.509159, 0.502968, 0.50301, 0.503367, 0.501883, 0.501219, 0.50009, 0.502221, 0.498096, 0.497669, 0.493998, 0.493684, 0.494457, 0.496853, 0.491346, 0.479602, 0.478509, 0.476348, 0.472062, 0.47275, 0.470722, 0.468494, 0.466405, 0.462993, 0.465878, 0.465402, 0.461705, 0.455853, 0.458518];
+const vLoss    = [0.46626, 0.410215, 0.430825, 0.41542, 0.402106, 0.452862, 0.370097, 0.403223, 0.403318, 0.378848, 0.376088, 0.378189, 0.37855, 0.389035, 0.398507, 0.413486, 0.39653, 0.385123, 0.381143, 0.416032, 0.383971, 0.38458, 0.400157, 0.380018, 0.380092, 0.417626, 0.372188, 0.390965, 0.36908, 0.389815, 0.398704, 0.417908, 0.350275, 0.385194, 0.364728, 0.38107, 0.41226, 0.451022, 0.382484, 0.414984, 0.404705, 0.38009, 0.414852, 0.373749, 0.401721, 0.373818, 0.384549, 0.411763, 0.432731, 0.41497, 0.445671, 0.379263, 0.421795, 0.429444, 0.414901, 0.423525, 0.404164, 0.436044];
+const tAcc     = [0.673163, 0.696686, 0.708674, 0.719795, 0.723753, 0.726543, 0.733818, 0.735854, 0.739888, 0.741886, 0.745128, 0.751008, 0.750292, 0.752215, 0.751989, 0.752818, 0.754929, 0.758774, 0.765145, 0.769367, 0.773325, 0.771742, 0.773778, 0.777924, 0.773778, 0.77144, 0.778113, 0.782448, 0.782674, 0.781053, 0.784597, 0.781732, 0.785841, 0.786859, 0.786331, 0.786331, 0.785954, 0.787462, 0.786708, 0.787726, 0.792023, 0.787386, 0.78848, 0.790666, 0.795454, 0.796698, 0.798771, 0.798846, 0.802164, 0.80239, 0.803634, 0.804878, 0.805368, 0.80435, 0.802239, 0.804878, 0.808912, 0.80959];
+const vAcc     = [0.82722, 0.859989, 0.840067, 0.850866, 0.845094, 0.836716, 0.856637, 0.837274, 0.845653, 0.852728, 0.8531, 0.849935, 0.84919, 0.842115, 0.846397, 0.816794, 0.837647, 0.846397, 0.851052, 0.831875, 0.842674, 0.84528, 0.831875, 0.846956, 0.852541, 0.826476, 0.843232, 0.84286, 0.850866, 0.837647, 0.839322, 0.824055, 0.85701, 0.842487, 0.854031, 0.842487, 0.825545, 0.786818, 0.844908, 0.828896, 0.827779, 0.844349, 0.830013, 0.847701, 0.831875, 0.846584, 0.844163, 0.821449, 0.81698, 0.825358, 0.80916, 0.847887, 0.823683, 0.825172, 0.828151, 0.8194, 0.834295, 0.817166];
+const vF1      = [0.658572, 0.752306, 0.702253, 0.732733, 0.711111, 0.737818, 0.741263, 0.717518, 0.729879, 0.75609, 0.755954, 0.745741, 0.756903, 0.754203, 0.752029, 0.716753, 0.736077, 0.747629, 0.751707, 0.739093, 0.748137, 0.739417, 0.737881, 0.755793, 0.763723, 0.732798, 0.747602, 0.751032, 0.754971, 0.745178, 0.746251, 0.728682, 0.763838, 0.745487, 0.745949, 0.749852, 0.733276, 0.686215, 0.752304, 0.737504, 0.733199, 0.744186, 0.739217, 0.748153, 0.739243, 0.752849, 0.749025, 0.724978, 0.721135, 0.732153, 0.709385, 0.751294, 0.725109, 0.728377, 0.730982, 0.720783, 0.73885, 0.718625];
+const vPrec    = [0.685824, 0.703635, 0.688179, 0.693182, 0.698023, 0.638716, 0.705694, 0.660321, 0.676329, 0.669945, 0.671429, 0.672738, 0.657113, 0.638684, 0.653605, 0.604076, 0.643046, 0.658405, 0.669431, 0.624512, 0.646241, 0.663851, 0.625492, 0.651306, 0.660134, 0.615904, 0.648466, 0.643905, 0.664871, 0.634644, 0.63833, 0.613043, 0.675367, 0.648352, 0.687986, 0.643982, 0.613333, 0.559928, 0.648718, 0.618295, 0.618793, 0.655526, 0.619732, 0.662125, 0.62439, 0.653306, 0.649844, 0.60945, 0.601799, 0.613691, 0.591769, 0.659188, 0.614665, 0.615949, 0.621407, 0.607472, 0.631078, 0.603755];
+const vRec     = [0.633404, 0.808209, 0.716914, 0.77707, 0.724699, 0.873319, 0.780609, 0.785563, 0.79264, 0.867657, 0.864827, 0.836518, 0.892427, 0.920736, 0.88535, 0.881104, 0.86058, 0.864827, 0.857042, 0.905166, 0.888181, 0.834395, 0.899505, 0.900212, 0.905874, 0.904459, 0.882519, 0.90092, 0.873319, 0.902335, 0.898089, 0.898089, 0.878981, 0.876858, 0.814579, 0.897381, 0.911536, 0.886058, 0.895258, 0.913659, 0.899505, 0.86058, 0.915782, 0.859873, 0.905874, 0.888181, 0.883935, 0.894551, 0.899505, 0.907289, 0.88535, 0.873319, 0.883935, 0.891012, 0.887473, 0.886058, 0.891012, 0.887473];
+const lrVals   = [0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.0005, 0.00025, 0.00025, 0.00025, 0.00025, 0.00025, 0.00025, 0.00025, 0.00025, 0.00025, 0.00025, 0.00025, 0.000125, 0.000125, 0.000125];
+const bestEp   = 33;
+
+// Best-epoch vertical annotation (red dashed line)
+const bestAnnotation = {
+    annotations: {
+        bestLine: {
+            type: 'line',
+            xMin: bestEp,
+            xMax: bestEp,
+            borderColor: 'rgba(239,68,68,0.55)',
+            borderWidth: 2,
+            borderDash: [6, 4],
+            label: {
+                display: true,
+                content: 'Best (ep ' + bestEp + ')',
+                position: 'start',
+                backgroundColor: 'rgba(239,68,68,0.8)',
+                color: '#fff',
+                font: { size: 10, weight: 'bold' },
+                padding: 3,
+            },
+        }
+    }
+};
+
+// ── Loss Chart ──
+new Chart(document.getElementById('chartLoss'), {
+    type: 'line',
+    data: {
+        labels: epochs,
+        datasets: [
+            { label: 'Train Loss', data: tLoss, borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,.1)', tension: .3, pointRadius: 0 },
+            { label: 'Val Loss',   data: vLoss, borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,.1)', tension: .3, pointRadius: 0 },
+        ]
+    },
+    options: { responsive: true, maintainAspectRatio: false,
+        plugins: { annotation: bestAnnotation },
+        scales: { x: { title: { display: true, text: 'Epoch' } }, y: { title: { display: true, text: 'Loss' } } },
+    }
+});
+
+// ── Accuracy Chart ──
+new Chart(document.getElementById('chartAcc'), {
+    type: 'line',
+    data: {
+        labels: epochs,
+        datasets: [
+            { label: 'Train Acc', data: tAcc, borderColor: '#2563eb', tension: .3, pointRadius: 0 },
+            { label: 'Val Acc',   data: vAcc, borderColor: '#f59e0b', tension: .3, pointRadius: 0 },
+        ]
+    },
+    options: { responsive: true, maintainAspectRatio: false,
+        plugins: { annotation: bestAnnotation },
+        scales: { x: { title: { display: true, text: 'Epoch' } }, y: { title: { display: true, text: 'Accuracy' }, min: 0.4, max: 1.0 } },
+    }
+});
+
+// ── F1 / Prec / Recall Chart ──
+new Chart(document.getElementById('chartF1'), {
+    type: 'line',
+    data: {
+        labels: epochs,
+        datasets: [
+            { label: 'F1',        data: vF1,   borderColor: '#2563eb', tension: .3, pointRadius: 0 },
+            { label: 'Precision',  data: vPrec, borderColor: '#10b981', tension: .3, pointRadius: 0, borderDash: [5,3] },
+            { label: 'Recall',     data: vRec,  borderColor: '#ef4444', tension: .3, pointRadius: 0, borderDash: [5,3] },
+        ]
+    },
+    options: { responsive: true, maintainAspectRatio: false,
+        plugins: { annotation: bestAnnotation },
+        scales: { x: { title: { display: true, text: 'Epoch' } }, y: { title: { display: true, text: 'Score' }, min: 0.0, max: 1.0 } },
+    }
+});
+
+// ── Learning Rate Chart ──
+new Chart(document.getElementById('chartLR'), {
+    type: 'line',
+    data: {
+        labels: epochs,
+        datasets: [
+            { label: 'Learning Rate', data: lrVals, borderColor: '#8b5cf6', tension: .3, pointRadius: 0, fill: true, backgroundColor: 'rgba(139,92,246,.08)' },
+        ]
+    },
+    options: { responsive: true, maintainAspectRatio: false,
+        plugins: { annotation: bestAnnotation },
+        scales: { x: { title: { display: true, text: 'Epoch' } }, y: { title: { display: true, text: 'LR' }, type: 'logarithmic' } },
+    }
+});
+</script>
+</body>
+</html>
