@@ -45,7 +45,10 @@ source 3ddfa-venv/bin/activate
 # Extract face embeddings pre-render
 python3 extract_face_embeddings.py -i "$VIDEO_PATH" --dumps_dir dumps -o face_embeddings.npz
 
+# Reindex face IDs in dump CSVs so they are persistent across frames
+python3 reindex_face_ids.py --dumps_dir dumps --embeddings face_embeddings.npz
+
 OUTPUT_NAME="outputs/$(basename "${VIDEO_PATH%.*}")_output.${VIDEO_PATH##*.}"
-python3 multiface_distance_render.py -i "$VIDEO_PATH" -o "$OUTPUT_NAME" --dumps_dir dumps --embeddings face_embeddings.npz
+python3 multiface_distance_render.py -i "$VIDEO_PATH" -o "$OUTPUT_NAME" --dumps_dir dumps
 deactivate
 echo "Done!"
