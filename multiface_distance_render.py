@@ -18,7 +18,8 @@ from tqdm import tqdm
 from collections import deque
 import subprocess
 import os
-from scipy.optimize import linear_sum_assignment
+
+from reindex_face_ids import compute_assignment_map, _reindex_df
 
 # Color scheme for different faces (BGR format for OpenCV)
 FACE_COLORS_BGR = [
@@ -50,65 +51,10 @@ def calculate_distance(z_value):
 # extract one vector per (frame, face). Pass precomputed embeddings via
 # --embeddings path.npz; this module matches faces frame-to-frame by
 # embedding similarity (cosine) and assigns stable track IDs.
-#
-# You do NOT need to change your dump data. The existing mouth_position.csv
-# already has 68 landmark (x,y,z) per (seconds, face_idx). From those you
-# derive a face bbox (min/max x,y + padding) and crop the frame. See
-# extract_face_embeddings.py for a script that iterates (seconds, face_idx),
+# Assignment and reindexing logic: reindex_face_ids.compute_assignment_map, _reindex_df.
+# See extract_face_embeddings.py for a script that iterates (seconds, face_idx),
 # crops using landmarks, and optionally runs your embedding model → .npz.
 # ---------------------------------------------------------------------------
-
-def _normalize_embeddings(emb):
-    """L2-normalize rows for cosine similarity via dot product."""
-    n = np.linalg.norm(emb, axis=1, keepdims=True)
-    n = np.where(n > 1e-12, n, 1.0)
-    return emb / n
-
-
-def _assignment_by_similarity(prev_track_embs, curr_face_embs, similarity_threshold=0.0):
-    """
-    Assign current faces to previous tracks by maximizing cosine similarity.
-    prev_track_embs: list of (track_id, embedding 1D array)
-    curr_face_embs: list of (face_idx, embedding 1D array)
-    Returns: list of (curr_face_idx, track_id). Uses Hungarian on cost = 1 - similarity.
-    """
-    n_curr = len(curr_face_embs)
-    n_prev = len(prev_track_embs)
-    if n_curr == 0:
-        return []
-    if n_prev == 0:
-        return [(c[0], i) for i, c in enumerate(curr_face_embs)]
-
-    prev_ids = [t[0] for t in prev_track_embs]
-    prev_emb = np.array([t[1] for t in prev_track_embs], dtype=np.float64)
-    curr_idx = [c[0] for c in curr_face_embs]
-    curr_emb = np.array([c[1] for c in curr_face_embs], dtype=np.float64)
-    prev_emb = _normalize_embeddings(prev_emb)
-    curr_emb = _normalize_embeddings(curr_emb)
-    # similarity (n_curr, n_prev); cost = 1 - similarity
-    sim = np.dot(curr_emb, prev_emb.T)
-    cost = 1.0 - np.clip(sim, -1.0, 1.0)
-
-    if n_curr <= n_prev:
-        row_ind, col_ind = linear_sum_assignment(cost)
-        return [(curr_idx[r], prev_ids[c]) for r, c in zip(row_ind, col_ind)]
-    # n_curr > n_prev: add virtual "new" columns
-    new_col_cost = 1.0 - similarity_threshold
-    cost_mat = np.full((n_curr, n_curr), new_col_cost, dtype=np.float64)
-    cost_mat[:, :n_prev] = cost
-    row_ind, col_ind = linear_sum_assignment(cost_mat)
-    next_id = max(prev_ids) + 1
-    result = []
-    new_id = next_id
-    for r, c in zip(row_ind, col_ind):
-        if c < n_prev:
-            track_id = prev_ids[c]
-        else:
-            track_id = new_id
-            new_id += 1
-        result.append((curr_idx[r], track_id))
-    return result
-
 
 def load_embeddings_npz(path):
     """
@@ -126,69 +72,6 @@ def load_embeddings_npz(path):
     if len(sec) != len(fidx) or len(sec) != len(emb):
         raise ValueError("embeddings.npz: 'embeddings', 'seconds', 'face_idx' must have same length")
     return emb, sec, fidx
-
-
-def compute_face_track_ids_from_embeddings(embeddings, seconds_arr, face_idx_arr, df_face_count,
-                                          similarity_threshold=0.3, drop_after_frames=60):
-    """
-    Assign stable track IDs by matching face embeddings across consecutive frames.
-    embeddings: (N, D) array; seconds_arr, face_idx_arr: (N,) arrays; each row is one (seconds, face_idx).
-    Returns: dict (round(seconds,6), face_idx_orig) -> track_id for reindexing.
-    """
-    sec_key = np.round(seconds_arr, 6)
-    # Build (seconds, face_idx) -> embedding
-    key_to_emb = {}
-    for i in range(len(sec_key)):
-        key = (float(sec_key[i]), int(face_idx_arr[i]))
-        key_to_emb[key] = embeddings[i]
-
-    frames = df_face_count.sort_values('seconds')[['seconds', 'face_count']].values
-    assignment_map = {}
-    tracks = {}  # track_id -> (embedding, last_frame_idx)
-    tol = 0.001
-
-    for frame_idx, (seconds, face_count) in enumerate(frames):
-        sec_k = round(float(seconds), 6)
-        curr_list = []
-        for fi in range(int(face_count)):
-            key = (sec_k, fi)
-            if key in key_to_emb:
-                curr_list.append((fi, key_to_emb[key].copy()))
-        if not curr_list:
-            to_drop = [tid for tid, (_, last) in tracks.items() if frame_idx - last >= drop_after_frames]
-            for tid in to_drop:
-                del tracks[tid]
-            continue
-
-        prev_list = [(tid, emb) for tid, (emb, last) in tracks.items()]
-        assignment = _assignment_by_similarity(prev_list, curr_list, similarity_threshold=similarity_threshold)
-
-        for (curr_face_idx, track_id) in assignment:
-            assignment_map[(sec_k, curr_face_idx)] = track_id
-            key = (sec_k, curr_face_idx)
-            if key in key_to_emb:
-                tracks[track_id] = (key_to_emb[key].copy(), frame_idx)
-
-        for tid in list(tracks.keys()):
-            if frame_idx - tracks[tid][1] >= drop_after_frames:
-                del tracks[tid]
-
-    return assignment_map
-
-
-def reindex_mouth_by_track_id(df_mouth, assignment_map):
-    """
-    Replace face_idx in df_mouth with stable track_id using assignment_map.
-    assignment_map: (seconds, face_idx_orig) -> track_id. Seconds rounded to 6 decimals.
-    """
-    def track_id_for_row(row):
-        key = (round(float(row['seconds']), 6), int(row['face_idx']))
-        return assignment_map.get(key, row['face_idx'])
-
-    df = df_mouth.copy()
-    new_idx = df.apply(track_id_for_row, axis=1)
-    df['face_idx'] = new_idx.astype(int)
-    return df
 
 
 def draw_line_graph(frame, x, y, width, height, data_points, title, show_value=False, current_value=None, unit=""):
@@ -1651,12 +1534,12 @@ def main(args):
         print(f"  Loading face embeddings from {emb_path}...")
         embeddings, seconds_arr, face_idx_arr = load_embeddings_npz(emb_path)
         print(f"  Computing face track IDs from embeddings (similarity matching)...")
-        assignment_map = compute_face_track_ids_from_embeddings(
+        assignment_map = compute_assignment_map(
             embeddings, seconds_arr, face_idx_arr, df_face_count,
             similarity_threshold=getattr(args, 'embedding_threshold', 0.3),
             drop_after_frames=getattr(args, 'embedding_drop_frames', 60)
         )
-        df_mouth = reindex_mouth_by_track_id(df_mouth, assignment_map)
+        df_mouth = _reindex_df(df_mouth, assignment_map)
         if speaker_lookup:
             speaker_lookup = reindex_speaker_lookup(speaker_lookup, assignment_map)
         unique_faces = sorted(df_mouth['face_idx'].unique())
