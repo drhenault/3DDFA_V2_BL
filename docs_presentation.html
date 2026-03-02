@@ -1,0 +1,1438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Face Frontalization & Visual VAD — Algorithm Documentation</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --card: #1e293b;
+    --accent: #38bdf8;
+    --accent2: #a78bfa;
+    --green: #4ade80;
+    --red: #f87171;
+    --white: #f1f5f9;
+    --muted: #94a3b8;
+    --yellow: #fbbf24;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--white);
+    overflow: hidden;
+    height: 100vh;
+  }
+  .slide {
+    display: none;
+    width: 100vw;
+    height: 100vh;
+    padding: 50px 80px;
+    flex-direction: column;
+    justify-content: center;
+  }
+  .slide.active { display: flex; }
+  
+  .slide.title-slide {
+    align-items: center;
+    text-align: center;
+    justify-content: center;
+  }
+  .slide.title-slide h1 {
+    font-size: 3.2em;
+    font-weight: 800;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 20px;
+  }
+  .slide.title-slide h2 {
+    font-size: 1.5em;
+    color: var(--muted);
+    font-weight: 400;
+  }
+  .slide.title-slide .subtitle {
+    margin-top: 40px;
+    font-size: 1.1em;
+    color: var(--muted);
+  }
+
+  h1 {
+    font-size: 2.2em;
+    font-weight: 700;
+    margin-bottom: 30px;
+    color: var(--accent);
+  }
+  h2 {
+    font-size: 1.5em;
+    font-weight: 600;
+    margin-bottom: 15px;
+    color: var(--accent2);
+  }
+  h3 {
+    font-size: 1.2em;
+    font-weight: 600;
+    margin-bottom: 10px;
+    color: var(--yellow);
+  }
+  p, li {
+    font-size: 1.15em;
+    line-height: 1.7;
+    color: var(--white);
+  }
+  ul { padding-left: 30px; margin-bottom: 15px; }
+  li { margin-bottom: 8px; }
+  li::marker { color: var(--accent); }
+
+  .highlight { color: var(--accent); font-weight: 600; }
+  .highlight2 { color: var(--accent2); font-weight: 600; }
+  .green { color: var(--green); font-weight: 600; }
+  .red { color: var(--red); font-weight: 600; }
+  .yellow { color: var(--yellow); font-weight: 600; }
+
+  .columns {
+    display: flex;
+    gap: 40px;
+    flex: 1;
+    align-items: flex-start;
+  }
+  .col { flex: 1; }
+
+  .code {
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    padding: 20px 25px;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 0.9em;
+    line-height: 1.6;
+    overflow-x: auto;
+    white-space: pre;
+    color: #e6edf3;
+    margin: 15px 0;
+  }
+  .code .kw { color: #ff7b72; }
+  .code .fn { color: #d2a8ff; }
+  .code .str { color: #a5d6ff; }
+  .code .cmt { color: #8b949e; font-style: italic; }
+  .code .num { color: #79c0ff; }
+  .code .var { color: #ffa657; }
+
+  .formula {
+    background: linear-gradient(135deg, #1a1a2e, #16213e);
+    border: 2px solid var(--accent);
+    border-radius: 12px;
+    padding: 25px 35px;
+    text-align: center;
+    font-size: 1.4em;
+    margin: 20px 0;
+    font-family: 'Georgia', serif;
+    letter-spacing: 0.5px;
+  }
+  .formula-small {
+    background: linear-gradient(135deg, #1a1a2e, #16213e);
+    border: 2px solid var(--accent2);
+    border-radius: 12px;
+    padding: 18px 28px;
+    text-align: center;
+    font-size: 1.15em;
+    margin: 15px 0;
+    font-family: 'Georgia', serif;
+  }
+
+  .diagram {
+    background: var(--card);
+    border-radius: 12px;
+    padding: 25px;
+    margin: 15px 0;
+    border: 1px solid #334155;
+  }
+  .pipeline {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin: 15px 0;
+  }
+  .pipe-step {
+    background: linear-gradient(135deg, #1e3a5f, #1e293b);
+    border: 2px solid var(--accent);
+    border-radius: 10px;
+    padding: 14px 20px;
+    text-align: center;
+    font-size: 0.95em;
+    font-weight: 600;
+    min-width: 140px;
+  }
+  .pipe-step.accent2 { border-color: var(--accent2); }
+  .pipe-step.green-border { border-color: var(--green); }
+  .pipe-step.yellow-border { border-color: var(--yellow); }
+  .pipe-arrow {
+    font-size: 1.8em;
+    color: var(--muted);
+  }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 15px 0;
+  }
+  th, td {
+    padding: 12px 18px;
+    text-align: left;
+    border-bottom: 1px solid #334155;
+    font-size: 1.05em;
+  }
+  th {
+    background: #1e3a5f;
+    color: var(--accent);
+    font-weight: 600;
+  }
+  tr:hover { background: rgba(56, 189, 248, 0.05); }
+
+  .color-dot {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    margin-right: 8px;
+    vertical-align: middle;
+  }
+  .dot-white { background: white; }
+  .dot-red { background: #f87171; }
+  .dot-green { background: #4ade80; }
+
+  .landmark-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin: 10px 0;
+  }
+  .landmark-item {
+    background: rgba(56, 189, 248, 0.08);
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 10px 15px;
+    font-size: 0.95em;
+  }
+  .landmark-item .idx { color: var(--yellow); font-weight: 700; font-family: monospace; }
+
+  .nav {
+    position: fixed;
+    bottom: 25px;
+    right: 30px;
+    display: flex;
+    gap: 12px;
+    z-index: 100;
+  }
+  .nav button {
+    background: var(--card);
+    color: var(--white);
+    border: 1px solid #475569;
+    border-radius: 8px;
+    padding: 10px 20px;
+    cursor: pointer;
+    font-size: 1em;
+    transition: all 0.2s;
+  }
+  .nav button:hover { background: var(--accent); color: var(--bg); }
+  .slide-counter {
+    position: fixed;
+    bottom: 30px;
+    left: 30px;
+    color: var(--muted);
+    font-size: 0.95em;
+  }
+
+  .section-divider {
+    align-items: center;
+    text-align: center;
+  }
+  .section-divider h1 {
+    font-size: 3em;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .section-divider p {
+    color: var(--muted);
+    font-size: 1.3em;
+    margin-top: 15px;
+  }
+  .divider-line {
+    width: 120px;
+    height: 4px;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    border-radius: 2px;
+    margin: 25px auto;
+  }
+
+  .note {
+    background: rgba(251, 191, 36, 0.08);
+    border-left: 4px solid var(--yellow);
+    border-radius: 0 8px 8px 0;
+    padding: 15px 20px;
+    margin: 15px 0;
+    font-size: 1em;
+  }
+
+  .timeline-row {
+    display: flex;
+    align-items: center;
+    margin: 8px 0;
+    font-size: 1.05em;
+  }
+  .timeline-label {
+    min-width: 100px;
+    font-weight: 600;
+    color: var(--muted);
+  }
+  .timeline-bar {
+    flex: 1;
+    height: 28px;
+    border-radius: 6px;
+    display: flex;
+    overflow: hidden;
+  }
+  .t-segment {
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75em;
+    font-weight: 600;
+    color: var(--bg);
+  }
+  .t-red { background: var(--red); }
+  .t-green { background: var(--green); }
+  .t-yellow { background: var(--yellow); }
+</style>
+</head>
+<body>
+
+<!-- ============================================================ -->
+<!-- SLIDE 1: TITLE -->
+<!-- ============================================================ -->
+<div class="slide title-slide active" id="slide-1">
+  <h1>Face Frontalization<br>& Visual VAD</h1>
+  <h2>Head Pose Normalization & Visual Voice Activity Detection</h2>
+  <div class="divider-line"></div>
+  <div class="subtitle">
+    Algorithm documentation for the 3DDFA_V2 multi-face rendering system<br>
+    <span style="color:var(--muted); font-size:0.9em;">multiface_distance_render_v2.py</span>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 2: PROBLEM STATEMENT -->
+<!-- ============================================================ -->
+<div class="slide" id="slide-2">
+  <h1>1. Problem Statement</h1>
+  <div class="columns">
+    <div class="col">
+      <h2>Input Data</h2>
+      <ul>
+        <li>The <span class="highlight">3DDFA_V2</span> algorithm extracts <span class="highlight2">68 facial landmarks</span> from camera images in 3D (x, y, z)</li>
+        <li>Mouth landmarks: <span class="yellow">48-59</span> (outer) + <span class="yellow">60-67</span> (inner)</li>
+        <li>Supports multiple faces simultaneously (multi-face tracking)</li>
+      </ul>
+      
+      <h2 style="margin-top:25px;">The Problem</h2>
+      <ul>
+        <li>When the speaker <span class="red">turns their head</span> at an angle to the camera, mouth landmarks undergo <span class="red">perspective distortion</span></li>
+        <li>Head rotation movement ≠ speech movement</li>
+        <li>This makes reliable speech activity analysis impossible</li>
+      </ul>
+    </div>
+    <div class="col">
+      <div class="diagram">
+        <h3>Frontal Face (OK)</h3>
+        <p style="font-family:monospace; font-size:0.9em; line-height:1.4; color:var(--green); margin:10px 0;">
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;👁️&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;👁️<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;👃<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;👄👄👄<br>
+&nbsp;&nbsp;← symmetric points →
+        </p>
+        <p style="font-size:0.95em;">Mouth points reflect the <span class="green">actual shape</span></p>
+      </div>
+      <div class="diagram" style="margin-top:15px;">
+        <h3>Rotated Face (Problem)</h3>
+        <p style="font-family:monospace; font-size:0.9em; line-height:1.4; color:var(--red); margin:10px 0;">
+&nbsp;&nbsp;&nbsp;👁️&nbsp;👁️<br>
+&nbsp;&nbsp;&nbsp;&nbsp;👃<br>
+&nbsp;&nbsp;&nbsp;👄👄<br>
+&nbsp;&nbsp;← compressed →
+        </p>
+        <p style="font-size:0.95em;">Perspective <span class="red">distorts</span> the shape — mouth appears narrower</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 3: OVERALL PIPELINE -->
+<!-- ============================================================ -->
+<div class="slide" id="slide-3">
+  <h1>2. Processing Pipeline Overview</h1>
+  <p style="margin-bottom:25px;">Complete data flow from camera frame to visual voice activity detection:</p>
+  
+  <div class="pipeline">
+    <div class="pipe-step">🎥 Video<br>Frame</div>
+    <div class="pipe-arrow">→</div>
+    <div class="pipe-step">🔍 3DDFA_V2<br><small>68 3D landmarks</small></div>
+    <div class="pipe-arrow">→</div>
+    <div class="pipe-step accent2">🔄 Face<br>Frontalization<br><small>de-rotate mouth</small></div>
+    <div class="pipe-arrow">→</div>
+    <div class="pipe-step yellow-border">📐 MAR<br><small>Mouth Aspect Ratio</small></div>
+    <div class="pipe-arrow">→</div>
+    <div class="pipe-step green-border">🎤 V-VAD<br><small>P(speech) + active/inactive</small></div>
+  </div>
+
+  <div style="margin-top:35px;">
+    <table>
+      <tr>
+        <th>Stage</th>
+        <th>Input</th>
+        <th>Output</th>
+        <th>Function</th>
+      </tr>
+      <tr>
+        <td>3DDFA_V2</td>
+        <td>BGR image</td>
+        <td>68 × (x, y, z) per face</td>
+        <td><code>process_video.py</code></td>
+      </tr>
+      <tr>
+        <td><span class="highlight2">Frontalization</span></td>
+        <td>68 3D landmarks</td>
+        <td>20 frontalized mouth pts (2D)</td>
+        <td><code>frontalize_mouth_landmarks()</code></td>
+      </tr>
+      <tr>
+        <td><span class="yellow">MAR</span></td>
+        <td>Frontalized pts 60-67</td>
+        <td>Mouth openness ratio</td>
+        <td><code>compute_mouth_aspect_ratio()</code></td>
+      </tr>
+      <tr>
+        <td><span class="green">V-VAD</span></td>
+        <td>MAR time series</td>
+        <td>P(speech) ∈ [0,1] + bool</td>
+        <td><code>VisualVADDetector.update()</code><br><small style="color:var(--muted);">Sigmoid(Var) × Sigmoid(Mean) × Sigmoid(ZCR) + Hysteresis</small></td>
+      </tr>
+    </table>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 4: SECTION DIVIDER — FRONTALIZATION -->
+<!-- ============================================================ -->
+<div class="slide section-divider" id="slide-4">
+  <h1>Part I</h1>
+  <div class="divider-line"></div>
+  <h1 style="font-size:2.5em;">Face Frontalization</h1>
+  <p>Head pose normalization — de-rotating mouth landmarks</p>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 5: FRONTALIZATION — IDEA -->
+<!-- ============================================================ -->
+<div class="slide" id="slide-5">
+  <h1>3. Face Frontalization — Concept</h1>
+  <div class="columns">
+    <div class="col">
+      <h2>Objective</h2>
+      <p>Transform mouth point positions as if the speaker were looking <span class="highlight">straight at the camera</span>, regardless of actual head rotation.</p>
+      
+      <h2 style="margin-top:25px;">Approach: Direct 3D Geometry</h2>
+      <p>Use <span class="highlight2">stable facial landmarks</span> (eyes, nose, chin) to compute the 3D orientation of the head, then apply the <span class="highlight">inverse rotation</span> to the mouth points.</p>
+
+      <div class="note">
+        <strong>Key Insight:</strong> Eyes, nose bridge, and chin are bony structures — their relative positions <em>do not change</em> with facial expression (speech). They form an ideal reference frame.
+      </div>
+    </div>
+    <div class="col">
+      <h3>Stable Reference Points Used</h3>
+      <div class="landmark-grid">
+        <div class="landmark-item"><span class="idx">pt 36, 39</span> — right eye corners</div>
+        <div class="landmark-item"><span class="idx">pt 42, 45</span> — left eye corners</div>
+        <div class="landmark-item"><span class="idx">pt 27</span> — nose bridge top</div>
+        <div class="landmark-item"><span class="idx">pt 8</span> — chin</div>
+      </div>
+      
+      <h3 style="margin-top:20px;">Mouth Points (transformed)</h3>
+      <div class="landmark-grid">
+        <div class="landmark-item"><span class="idx">pt 48-59</span> — outer mouth (12 pts)</div>
+        <div class="landmark-item"><span class="idx">pt 60-67</span> — inner mouth (8 pts)</div>
+      </div>
+      <p style="margin-top:15px; font-size:0.95em; color:var(--muted);">A total of 20 mouth points are de-rotated, preserving expression (open/closed/asymmetric) while removing head pose distortion.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 6: FRONTALIZATION — STEP 1 -->
+<!-- ============================================================ -->
+<div class="slide" id="slide-6">
+  <h1>4. Step 1 — Computing the Face Coordinate Frame</h1>
+  <div class="columns">
+    <div class="col">
+      <h2>Three Face Axes</h2>
+      <p>We compute a <span class="highlight">local coordinate frame</span> of the face from reference landmarks:</p>
+      
+      <h3 style="margin-top:20px;">X-axis — horizontal direction</h3>
+      <div class="formula-small">
+        <span style="color:var(--accent);">x̂</span> = normalize( eye_right − eye_left )
+      </div>
+      <p style="font-size:0.95em;">Vector from left eye center to right eye center.</p>
+
+      <h3 style="margin-top:15px;">Z-axis — face normal</h3>
+      <div class="formula-small">
+        <span style="color:var(--accent);">ẑ</span> = normalize( x̂ × y_approx )
+      </div>
+      <p style="font-size:0.95em;">Cross product gives a vector perpendicular to the face plane (pointing toward camera).</p>
+
+      <h3 style="margin-top:15px;">Y-axis — vertical (re-orthogonalized)</h3>
+      <div class="formula-small">
+        <span style="color:var(--accent);">ŷ</span> = normalize( ẑ × x̂ )
+      </div>
+      <p style="font-size:0.95em;">Guarantees a proper orthonormal frame.</p>
+    </div>
+    <div class="col">
+      <div class="code"><span class="cmt"># Eye centers (structurally rigid)</span>
+left_eye  = (<span class="var">p</span>[<span class="num">36</span>] + <span class="var">p</span>[<span class="num">39</span>]) / <span class="num">2.0</span>
+right_eye = (<span class="var">p</span>[<span class="num">42</span>] + <span class="var">p</span>[<span class="num">45</span>]) / <span class="num">2.0</span>
+
+<span class="cmt"># X-axis: horizontal face direction</span>
+<span class="var">x_axis</span> = normalize(right_eye - left_eye)
+
+<span class="cmt"># Approximate Y-axis: nose → chin</span>
+<span class="var">y_approx</span> = <span class="var">p</span>[<span class="num">8</span>] - <span class="var">p</span>[<span class="num">27</span>]
+
+<span class="cmt"># Z-axis: face normal (cross product)</span>
+<span class="var">z_axis</span> = normalize(cross(<span class="var">x_axis</span>, <span class="var">y_approx</span>))
+
+<span class="cmt"># Re-orthogonalize Y-axis</span>
+<span class="var">y_axis</span> = normalize(cross(<span class="var">z_axis</span>, <span class="var">x_axis</span>))</div>
+
+      <div class="note">
+        <strong>Why re-orthogonalize?</strong><br>
+        The <code>y_approx</code> vector (nose→chin) is not guaranteed to be perpendicular to <code>x_axis</code>. The cross product <code>ẑ × x̂</code> ensures that <code>ŷ</code> is orthogonal to both other axes, forming a valid orthonormal basis.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 7: FRONTALIZATION — STEP 2 -->
+<!-- ============================================================ -->
+<div class="slide" id="slide-7">
+  <h1>5. Step 2 — Rotation Matrix & Inverse Transform</h1>
+  <div class="columns">
+    <div class="col">
+      <h2>Building the Rotation Matrix</h2>
+      <p>The columns of <span class="highlight">R<sub>face</sub></span> are the face axes expressed in the image coordinate system:</p>
+      
+      <div class="formula">
+        R<sub>face</sub> = [ x̂ | ŷ | ẑ ]
+      </div>
+      
+      <p>This matrix transforms from the <span class="highlight2">canonical (frontal) frame</span> to the <span class="red">current face orientation</span>.</p>
+
+      <h2 style="margin-top:25px;">Inverse Rotation</h2>
+      <p>Since R is an orthonormal (orthogonal) matrix, its inverse equals its transpose:</p>
+      
+      <div class="formula">
+        R<sub>inv</sub> = R<sub>face</sub><sup>T</sup> = R<sub>face</sub><sup>−1</sup>
+      </div>
+      
+      <p>R<sub>inv</sub> transforms from the <span class="red">current face frame</span> back to the <span class="green">frontal frame</span>.</p>
+    </div>
+    <div class="col">
+      <h2>Orthogonal Matrix Properties</h2>
+      <div class="diagram">
+        <ul>
+          <li><strong>R · R<sup>T</sup> = I</strong> (identity matrix)</li>
+          <li><strong>det(R) = 1</strong> (preserves orientation)</li>
+          <li><strong>R<sup>-1</sup> = R<sup>T</sup></strong> (inverse = transpose)</li>
+          <li>Preserves <strong>distances</strong> and <strong>angles</strong> between points</li>
+        </ul>
+      </div>
+      
+      <div class="code"><span class="cmt"># Rotation matrix: columns = face axes</span>
+<span class="var">R_face</span> = np.<span class="fn">column_stack</span>([
+    <span class="var">x_axis</span>,   <span class="cmt"># column 0</span>
+    <span class="var">y_axis</span>,   <span class="cmt"># column 1</span>
+    <span class="var">z_axis</span>    <span class="cmt"># column 2</span>
+])
+
+<span class="cmt"># Inverse = transpose (R is orthogonal)</span>
+<span class="var">R_inv</span> = <span class="var">R_face</span>.T</div>
+
+      <div class="note">
+        <strong>Key:</strong> Transposing a 3×3 matrix is an O(1) operation — no expensive matrix inversion needed.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 8: FRONTALIZATION — STEP 3 -->
+<!-- ============================================================ -->
+<div class="slide" id="slide-8">
+  <h1>6. Step 3 — De-rotating the Mouth Points</h1>
+  <div class="columns">
+    <div class="col">
+      <h2>Procedure</h2>
+      <ol style="padding-left:20px;">
+        <li style="margin-bottom:12px;">
+          <strong>Extract</strong> 3D mouth points (48-67) from CSV data
+        </li>
+        <li style="margin-bottom:12px;">
+          <strong>Center</strong> — subtract centroid (center of mass)
+          <div class="formula-small" style="text-align:left; font-size:1em;">
+            P<sub>centered</sub> = P<sub>mouth</sub> − centroid
+          </div>
+        </li>
+        <li style="margin-bottom:12px;">
+          <strong>Apply inverse rotation</strong>
+          <div class="formula-small" style="text-align:left; font-size:1em;">
+            P<sub>frontal</sub> = R<sub>inv</sub> · P<sub>centered</sub><sup>T</sup>
+          </div>
+        </li>
+        <li style="margin-bottom:12px;">
+          <strong>Restore position</strong> — add centroid back
+          <div class="formula-small" style="text-align:left; font-size:1em;">
+            P<sub>result</sub> = P<sub>frontal</sub> + centroid
+          </div>
+        </li>
+      </ol>
+
+      <div class="note">
+        <strong>Why centering?</strong> Rotation must be performed around the local center (mouth centroid), not around the image origin. Without centering, points would drift far from the face.
+      </div>
+    </div>
+    <div class="col">
+      <div class="code"><span class="cmt"># Extract 20 mouth points in 3D</span>
+<span class="var">mouth_3d</span> = np.<span class="fn">array</span>([
+    points_3d[i] <span class="kw">for</span> i <span class="kw">in</span> <span class="fn">range</span>(<span class="num">48</span>, <span class="num">68</span>)
+])
+
+<span class="cmt"># Centroid (center of mass)</span>
+<span class="var">centroid</span> = <span class="var">mouth_3d</span>.<span class="fn">mean</span>(axis=<span class="num">0</span>)
+
+<span class="cmt"># Center, de-rotate, restore</span>
+<span class="var">mouth_centered</span> = <span class="var">mouth_3d</span> - <span class="var">centroid</span>
+<span class="var">mouth_frontal</span> = (<span class="var">R_inv</span> @ <span class="var">mouth_centered</span>.T).T
+<span class="var">result</span> = <span class="var">mouth_frontal</span> + <span class="var">centroid</span></div>
+
+      <h3 style="margin-top:20px;">What does this transformation preserve vs remove?</h3>
+      <table>
+        <tr><th>Preserved ✓</th><th>Removed ✗</th></tr>
+        <tr><td><span class="green">✓</span> Mouth shape (expression)</td><td><span class="red">✗</span> Yaw (left/right rotation)</td></tr>
+        <tr><td><span class="green">✓</span> Open/closed state</td><td><span class="red">✗</span> Pitch (up/down tilt)</td></tr>
+        <tr><td><span class="green">✓</span> Speech asymmetries</td><td><span class="red">✗</span> Roll (head tilt)</td></tr>
+        <tr><td><span class="green">✓</span> Position in image</td><td></td></tr>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 9: SECTION DIVIDER — V-VAD -->
+<!-- ============================================================ -->
+<div class="slide section-divider" id="slide-9">
+  <h1>Part II</h1>
+  <div class="divider-line"></div>
+  <h1 style="font-size:2.5em;">Visual Voice Activity Detection</h1>
+  <p>Detecting speech activity from frontalized mouth landmark dynamics</p>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 10: V-VAD — MAR -->
+<!-- ============================================================ -->
+<div class="slide" id="slide-10">
+  <h1>7. Mouth Aspect Ratio (MAR)</h1>
+  <div class="columns">
+    <div class="col">
+      <h2>Definition</h2>
+      <p>MAR measures the <span class="highlight">degree of mouth opening</span> — analogous to EAR (Eye Aspect Ratio) used for blink detection.</p>
+      
+      <p style="margin-top:15px;">Uses <span class="highlight2">inner mouth landmarks</span> (60-67):</p>
+
+      <div class="formula">
+        MAR = <span style="font-size:0.85em;">(|p<sub>61</sub>−p<sub>67</sub>| + |p<sub>62</sub>−p<sub>66</sub>| + |p<sub>63</sub>−p<sub>65</sub>|)</span><br>
+        <span style="font-size:0.8em;">―――――――――――――――――</span><br>
+        2 · |p<sub>60</sub> − p<sub>64</sub>|
+      </div>
+
+      <ul style="margin-top:15px;">
+        <li><strong>Numerator:</strong> 3 vertical distances (top↔bottom) — measure opening</li>
+        <li><strong>Denominator:</strong> mouth width (corner↔corner) — normalizes for size</li>
+        <li><strong>MAR ≈ 0:</strong> mouth closed</li>
+        <li><strong>MAR &gt; 0:</strong> mouth open (higher = wider)</li>
+      </ul>
+    </div>
+    <div class="col">
+      <h3>Inner Mouth Landmarks (60-67)</h3>
+      <div class="diagram" style="text-align:center; font-family:monospace; font-size:1.1em; line-height:2;">
+        <span style="color:var(--muted);">61 ─── 62 ─── 63</span><br>
+        <span style="color:var(--yellow);">60</span>
+        <span style="color:var(--muted);">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span>
+        <span style="color:var(--yellow);">64</span><br>
+        <span style="color:var(--muted);">67 ─── 66 ─── 65</span><br><br>
+        <span style="font-size:0.8em; color:var(--accent);">
+          ↕ d1 &nbsp;&nbsp;&nbsp; ↕ d2 &nbsp;&nbsp;&nbsp; ↕ d3<br>
+          (61↔67) &nbsp; (62↔66) &nbsp; (63↔65)<br><br>
+          ←——— d_horiz (60↔64) ———→
+        </span>
+      </div>
+
+      <div class="code"><span class="cmt"># 3 vertical distances</span>
+<span class="var">d1</span> = norm(<span class="var">p</span>[<span class="num">61</span>] - <span class="var">p</span>[<span class="num">67</span>])
+<span class="var">d2</span> = norm(<span class="var">p</span>[<span class="num">62</span>] - <span class="var">p</span>[<span class="num">66</span>])
+<span class="var">d3</span> = norm(<span class="var">p</span>[<span class="num">63</span>] - <span class="var">p</span>[<span class="num">65</span>])
+
+<span class="cmt"># Mouth width (normalization)</span>
+<span class="var">d_h</span> = norm(<span class="var">p</span>[<span class="num">60</span>] - <span class="var">p</span>[<span class="num">64</span>])
+
+<span class="var">MAR</span> = (<span class="var">d1</span> + <span class="var">d2</span> + <span class="var">d3</span>) / (<span class="num">2</span> * <span class="var">d_h</span>)</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 11: V-VAD — WHY FRONTALIZED MAR -->
+<!-- ============================================================ -->
+<div class="slide" id="slide-11">
+  <h1>8. Why Calculate MAR from Frontalized Points?</h1>
+  <div class="columns">
+    <div class="col">
+      <h2>Problem with Raw MAR</h2>
+      <p>MAR calculated from <span class="red">original</span> (raw) points contains <span class="red">noise</span> from head movement:</p>
+      <ul>
+        <li>Head turns sideways → mouth appears narrower → <span class="red">false MAR decrease</span></li>
+        <li>Head tilts down → mouth appears more open → <span class="red">false MAR increase</span></li>
+        <li>Head nodding → MAR oscillations <span class="red">mimic speech</span></li>
+      </ul>
+
+      <h2 style="margin-top:25px;">Solution: MAR after Frontalization</h2>
+      <p>MAR calculated from <span class="green">frontalized</span> points:</p>
+      <ul>
+        <li>Head movements → <span class="green">no effect</span> (removed by de-rotation)</li>
+        <li>Every MAR change → <span class="green">actual facial muscle movement</span></li>
+        <li>Clean signal = <span class="green">better speech detection</span></li>
+      </ul>
+    </div>
+    <div class="col">
+      <h3>Comparison: Raw vs Frontalized MAR</h3>
+      <div class="diagram">
+        <p style="margin-bottom:10px;"><strong>Scenario:</strong> Speaker turns head to the right without speaking</p>
+        <div class="timeline-row">
+          <div class="timeline-label">Raw MAR:</div>
+          <div class="timeline-bar">
+            <div class="t-segment t-green" style="width:30%;">high</div>
+            <div class="t-segment t-yellow" style="width:40%;">drops ↓</div>
+            <div class="t-segment t-red" style="width:30%;">low</div>
+          </div>
+        </div>
+        <p style="font-size:0.85em; color:var(--red); margin:5px 0;">↑ False change — perspective alters proportions</p>
+        
+        <div class="timeline-row" style="margin-top:10px;">
+          <div class="timeline-label" style="color:var(--green);">Frontal MAR:</div>
+          <div class="timeline-bar">
+            <div class="t-segment" style="width:100%; background:var(--muted);">stable (no speech)</div>
+          </div>
+        </div>
+        <p style="font-size:0.85em; color:var(--green); margin:5px 0;">↑ Correct — no change detected because mouth didn't move</p>
+      </div>
+
+      <div class="diagram" style="margin-top:15px;">
+        <p style="margin-bottom:10px;"><strong>Scenario:</strong> Speaker talks while looking sideways</p>
+        <div class="timeline-row">
+          <div class="timeline-label">Raw MAR:</div>
+          <div class="timeline-bar">
+            <div class="t-segment t-yellow" style="width:100%;">suppressed oscillations + offset</div>
+          </div>
+        </div>
+        <div class="timeline-row" style="margin-top:5px;">
+          <div class="timeline-label" style="color:var(--green);">Frontal MAR:</div>
+          <div class="timeline-bar">
+            <div class="t-segment t-green" style="width:20%;">↑</div>
+            <div class="t-segment t-red" style="width:15%;">↓</div>
+            <div class="t-segment t-green" style="width:25%;">↑</div>
+            <div class="t-segment t-red" style="width:15%;">↓</div>
+            <div class="t-segment t-green" style="width:25%;">↑</div>
+          </div>
+        </div>
+        <p style="font-size:0.85em; color:var(--green); margin:5px 0;">↑ Clear speech oscillations — easy to detect</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 12: V-VAD — DETECTION LOGIC (ZCR-enhanced) -->
+<!-- ============================================================ -->
+<div class="slide" id="slide-12">
+  <h1>9. V-VAD Detection Algorithm (ZCR-Enhanced)</h1>
+  <div class="columns">
+    <div class="col">
+      <h2>Sliding Window Analysis</h2>
+      <p>We analyze the <span class="highlight">MAR history</span> over the last N frames (window: <span class="yellow">0.3 seconds</span>, ~9 frames):</p>
+      
+      <div class="formula-small">
+        window = [MAR<sub>t-N</sub>, MAR<sub>t-N+1</sub>, ..., MAR<sub>t</sub>]
+      </div>
+
+      <h2 style="margin-top:20px;">Three Detection Conditions</h2>
+      
+      <h3>1. MAR Variance > threshold</h3>
+      <div class="formula-small">
+        Var(window) &gt; <span style="color:var(--yellow);">0.002</span>
+      </div>
+      <p style="font-size:0.95em;">Speaking produces rhythmic mouth open/close → <span class="highlight">high variance</span>.</p>
+
+      <h3 style="margin-top:15px;">2. Mean MAR > threshold</h3>
+      <div class="formula-small">
+        Mean(window) &gt; <span style="color:var(--yellow);">0.15</span>
+      </div>
+      <p style="font-size:0.95em;">Eliminates false positives from micro-movements of a closed mouth.</p>
+
+      <h3 style="margin-top:15px;">3. Zero-Crossing Rate (ZCR) ≥ threshold</h3>
+      <div class="formula-small">
+        ZCR( d/dt MAR ) ≥ <span style="color:var(--yellow);">3</span>
+      </div>
+      <p style="font-size:0.95em;">Detects <span class="highlight2">rhythmic oscillations</span> characteristic of speech (open-close-open-close).</p>
+
+      <div class="formula" style="background: linear-gradient(135deg, #1a2e1a, #162116); border-color: var(--green); margin-top:20px;">
+        <span style="color:var(--green);">P(speech)</span> = σ(Var) × σ(Mean) × σ(ZCR)<br>
+        <span style="font-size:0.7em; color:var(--muted);">binary: is_speaking = hysteresis( P(speech) )</span>
+      </div>
+    </div>
+    <div class="col">
+      <div class="code"><span class="kw">class</span> <span class="fn">VisualVADDetector</span>:
+  <span class="kw">def</span> <span class="fn">__init__</span>(self, ...):
+    self.<span class="var">window_size</span> = <span class="fn">int</span>(<span class="num">0.3</span> * fps)  <span class="cmt"># ~9 frames</span>
+    self.<span class="var">var_threshold</span> = <span class="num">0.002</span>
+    self.<span class="var">mar_activity_threshold</span> = <span class="num">0.15</span>
+    self.<span class="var">hold_frames</span> = <span class="fn">int</span>(<span class="num">1.0</span> * fps) <span class="cmt"># 30 frames</span>
+    self.<span class="var">min_zcr</span> = <span class="num">3</span>
+
+  <span class="kw">def</span> <span class="fn">update</span>(self, face_idx, mar):
+    self._history[face_idx].<span class="fn">append</span>(mar)
+    values = np.<span class="fn">array</span>(history)
+    <span class="var">mar_var</span>  = np.<span class="fn">var</span>(values)
+    <span class="var">mar_mean</span> = np.<span class="fn">mean</span>(values)
+
+    <span class="cmt"># ZCR of MAR derivative</span>
+    <span class="var">d</span> = np.<span class="fn">diff</span>(values)
+    <span class="var">signs</span> = np.<span class="fn">sign</span>(<span class="var">d</span>)
+    <span class="var">zcr</span> = np.<span class="fn">sum</span>(np.<span class="fn">abs</span>(np.<span class="fn">diff</span>(<span class="var">signs</span>)) &gt; <span class="num">0</span>)
+
+    <span class="var">raw_speaking</span> = (
+      <span class="var">mar_var</span>  &gt; self.<span class="var">var_threshold</span>
+      <span class="kw">and</span> <span class="var">mar_mean</span> &gt; self.<span class="var">mar_activity_threshold</span>
+      <span class="kw">and</span> <span class="var">zcr</span> &gt;= self.<span class="var">min_zcr</span>
+    )</div>
+
+      <h3 style="margin-top:15px;">Algorithm Parameters</h3>
+      <table>
+        <tr><th>Parameter</th><th>Value</th><th>Meaning</th></tr>
+        <tr><td>window_seconds</td><td><span class="highlight">0.3s</span></td><td>Analysis window (~9 frames)</td></tr>
+        <tr><td>var_threshold</td><td><span class="highlight">0.002</span></td><td>Min. MAR variance</td></tr>
+        <tr><td>mar_activity_threshold</td><td><span class="highlight">0.15</span></td><td>Min. mean MAR</td></tr>
+        <tr><td>hold_seconds</td><td><span class="highlight">1.0s</span></td><td>Hysteresis hold time</td></tr>
+        <tr><td>min_zcr</td><td><span class="highlight">3</span></td><td>Min. direction changes in window</td></tr>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 13: V-VAD — ZERO-CROSSING RATE (ZCR) -->
+<!-- ============================================================ -->
+<div class="slide" id="slide-13">
+  <h1>10. Zero-Crossing Rate (ZCR) — The Key Discriminator</h1>
+  <div class="columns">
+    <div class="col">
+      <h2>What is ZCR?</h2>
+      <p>ZCR counts how many times the <span class="highlight">derivative of MAR changes sign</span> (direction) within the sliding window:</p>
+      
+      <div class="formula-small">
+        d(MAR) = [MAR<sub>t+1</sub> − MAR<sub>t</sub>, MAR<sub>t+2</sub> − MAR<sub>t+1</sub>, ...]
+      </div>
+      <div class="formula-small" style="margin-top:10px;">
+        ZCR = count( sign(d<sub>i</sub>) ≠ sign(d<sub>i-1</sub>) )
+      </div>
+
+      <h2 style="margin-top:25px;">Why ZCR Helps</h2>
+      <p>Speech produces <span class="highlight2">rhythmic oscillations</span> — the mouth repeatedly opens and closes for each syllable. This creates many direction changes in the MAR signal.</p>
+      
+      <ul style="margin-top:15px;">
+        <li><span class="green">High ZCR (≥3):</span> Oscillatory motion → likely speech</li>
+        <li><span class="red">Low ZCR (0-2):</span> Monotonic motion (yawn, slow open/close) or static → not speech</li>
+      </ul>
+
+      <div class="note" style="margin-top:15px;">
+        <strong>Key Insight:</strong> Variance alone cannot distinguish speech from a single slow mouth opening (e.g., a yawn). ZCR detects the <em>rhythmic pattern</em> that is unique to speech.
+      </div>
+    </div>
+    <div class="col">
+      <h3>ZCR Visualization</h3>
+      <div class="diagram">
+        <p style="margin-bottom:10px;"><strong>Speech MAR signal:</strong> open-close-open-close...</p>
+        <div style="font-family:monospace; font-size:0.95em; line-height:1.8; color:var(--green); margin:10px 0;">
+          MAR: &nbsp;↑ ↓ ↑ ↓ ↑ ↓ ↑ ↓<br>
+          d(MAR): + − + − + − + −<br>
+          sign Δ: &nbsp;&nbsp;✓ ✓ ✓ ✓ ✓ ✓ ✓<br>
+          <span style="color:var(--accent);">ZCR = 7 → ≥ 3 ✓ (speech detected)</span>
+        </div>
+      </div>
+      <div class="diagram" style="margin-top:12px;">
+        <p style="margin-bottom:10px;"><strong>Yawn / slow open:</strong> single monotonic motion</p>
+        <div style="font-family:monospace; font-size:0.95em; line-height:1.8; color:var(--red); margin:10px 0;">
+          MAR: &nbsp;↑ ↑ ↑ ↑ ↑ ↑ ↑ ↑<br>
+          d(MAR): + + + + + + + +<br>
+          sign Δ: &nbsp;&nbsp;✗ ✗ ✗ ✗ ✗ ✗ ✗<br>
+          <span style="color:var(--red);">ZCR = 0 → < 3 ✗ (rejected)</span>
+        </div>
+      </div>
+      <div class="diagram" style="margin-top:12px;">
+        <p style="margin-bottom:10px;"><strong>Micro-tremor / noise:</strong> random tiny movements</p>
+        <div style="font-family:monospace; font-size:0.95em; line-height:1.8; color:var(--yellow); margin:10px 0;">
+          MAR: &nbsp;~ ~ ~ ~ ~ ~ ~ ~<br>
+          d(MAR): + − + − + + − +<br>
+          <span style="color:var(--yellow);">ZCR may be high but Variance is low → rejected by var_threshold</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 14: V-VAD — HYSTERESIS -->
+<!-- ============================================================ -->
+<div class="slide" id="slide-14">
+  <h1>11. Hysteresis (Hold Time) — Stabilizing Detection</h1>
+  <div class="columns">
+    <div class="col">
+      <h2>Problem: Flickering</h2>
+      <p>Without hysteresis, the detector <span class="red">rapidly switches</span> between states during speech:</p>
+      <ul>
+        <li>Between syllables: mouth closes for ~50-150ms</li>
+        <li>Plosive consonants (p, b, t, d, k) = momentary closure</li>
+        <li>MAR variance drops briefly → <span class="red">false switch to "inactive"</span></li>
+      </ul>
+
+      <h2 style="margin-top:25px;">Solution: Hold Timer</h2>
+      <p>Mechanism analogous to <span class="highlight">hangover</span> in audio VAD systems:</p>
+      <ol style="padding-left:20px;">
+        <li style="margin-bottom:8px;">When <code>raw_speaking = True</code> → <span class="green">reset timer</span> to full value (e.g. 30 frames = 1s)</li>
+        <li style="margin-bottom:8px;">When <code>raw_speaking = False</code> → <span class="yellow">decrement timer</span> by 1</li>
+        <li style="margin-bottom:8px;">State remains <span class="green">ACTIVE</span> as long as timer &gt; 0</li>
+      </ol>
+    </div>
+    <div class="col">
+      <div class="code"><span class="cmt"># Hysteresis logic</span>
+<span class="kw">if</span> <span class="var">raw_speaking</span>:
+    <span class="cmt"># Speech detected → reset timer</span>
+    self._hold_counter[face_idx] = \
+        self.<span class="var">hold_frames</span>  <span class="cmt"># e.g. 30</span>
+<span class="kw">else</span>:
+    <span class="cmt"># No speech → count down</span>
+    <span class="kw">if</span> self._hold_counter[face_idx] &gt; <span class="num">0</span>:
+        self._hold_counter[face_idx] -= <span class="num">1</span>
+
+<span class="cmt"># Active until timer expires</span>
+<span class="kw">return</span> self._hold_counter[face_idx] &gt; <span class="num">0</span></div>
+
+      <h3 style="margin-top:20px;">Hold Timer Visualization</h3>
+      <div class="diagram" style="font-size:0.9em;">
+        <p style="margin-bottom:5px; color:var(--muted);">Time →</p>
+        <div class="timeline-row">
+          <div class="timeline-label">raw_speaking:</div>
+          <div class="timeline-bar">
+            <div class="t-segment t-green" style="width:12%;">T</div>
+            <div class="t-segment t-red" style="width:8%;">F</div>
+            <div class="t-segment t-green" style="width:10%;">T</div>
+            <div class="t-segment t-red" style="width:5%;">F</div>
+            <div class="t-segment t-green" style="width:15%;">T</div>
+            <div class="t-segment t-red" style="width:30%;">F F F F F F</div>
+            <div class="t-segment t-red" style="width:20%;">F F F</div>
+          </div>
+        </div>
+        <div class="timeline-row">
+          <div class="timeline-label">hold timer:</div>
+          <div class="timeline-bar">
+            <div class="t-segment t-green" style="width:12%;">30</div>
+            <div class="t-segment t-green" style="width:8%;">28</div>
+            <div class="t-segment t-green" style="width:10%;">30</div>
+            <div class="t-segment t-green" style="width:5%;">29</div>
+            <div class="t-segment t-green" style="width:15%;">30</div>
+            <div class="t-segment t-yellow" style="width:15%;">↓ 20</div>
+            <div class="t-segment t-yellow" style="width:15%;">↓ 5</div>
+            <div class="t-segment t-red" style="width:20%;">0</div>
+          </div>
+        </div>
+        <div class="timeline-row">
+          <div class="timeline-label" style="color:var(--green);">Output:</div>
+          <div class="timeline-bar">
+            <div class="t-segment t-green" style="width:65%;">🟢 ACTIVE (stable green)</div>
+            <div class="t-segment t-yellow" style="width:15%;">fading</div>
+            <div class="t-segment t-red" style="width:20%;">🔴</div>
+          </div>
+        </div>
+        <p style="margin-top:8px; font-size:0.85em; color:var(--muted);">Timer resets with each speech detection. During continuous speech, the green state is sustained. After speech ends, it holds for ~1 second.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 15: SPEECH PROBABILITY -->
+<!-- ============================================================ -->
+<div class="slide" id="slide-15">
+  <h1>12. Speech Probability — Continuous Confidence Score</h1>
+  <div class="columns">
+    <div class="col">
+      <h2>From Binary to Continuous</h2>
+      <p>Instead of only a <span class="red">binary</span> active/inactive decision, V-VAD now also outputs a <span class="highlight">continuous probability</span> P(speech) ∈ [0, 1].</p>
+
+      <h2 style="margin-top:20px;">Sigmoid Normalization</h2>
+      <p>Each feature is normalized relative to its threshold using a <span class="highlight2">sigmoid function</span>:</p>
+
+      <div class="formula-small">
+        σ(x, c, k) = 1 / (1 + e<sup>−k·(x/c − 1)</sup>)
+      </div>
+
+      <p style="font-size:0.95em; margin-top:10px;">Properties:</p>
+      <ul>
+        <li>At the threshold (x = c): <span class="yellow">σ = 0.5</span></li>
+        <li>Well above threshold: σ → 1.0</li>
+        <li>Well below threshold: σ → 0.0</li>
+        <li>Steepness <span class="yellow">k = 4</span> gives a smooth but decisive transition</li>
+      </ul>
+
+      <h2 style="margin-top:20px;">Combined Probability</h2>
+      <div class="formula" style="background: linear-gradient(135deg, #1a2e1a, #162116); border-color: var(--green);">
+        P(speech) = σ(Var/thr) × σ(MAR/thr) × σ(ZCR/thr)
+      </div>
+      <p style="font-size:0.95em;">Multiplicative combination — <span class="highlight">all features must contribute</span> for high probability. If any single feature is low, the probability drops.</p>
+    </div>
+    <div class="col">
+      <div class="code"><span class="cmt"># Sigmoid normalization (k=4)</span>
+<span class="kw">def</span> <span class="fn">_sigmoid</span>(x, center, k=<span class="num">4.0</span>):
+    z = k * (x - center)
+    <span class="kw">return</span> <span class="num">1.0</span> / (<span class="num">1.0</span> + np.<span class="fn">exp</span>(-z))
+
+<span class="cmt"># Per-feature scores (0.5 at threshold)</span>
+<span class="var">s_var</span> = <span class="fn">sigmoid</span>(mar_var / var_thr, <span class="num">1.0</span>)
+<span class="var">s_mar</span> = <span class="fn">sigmoid</span>(mar_mean / mar_thr, <span class="num">1.0</span>)
+<span class="var">s_zcr</span> = <span class="fn">sigmoid</span>(zcr / min_zcr, <span class="num">1.0</span>)
+
+<span class="cmt"># Combined probability</span>
+<span class="var">prob</span> = <span class="var">s_var</span> * <span class="var">s_mar</span> * <span class="var">s_zcr</span></div>
+
+      <h3 style="margin-top:20px;">Smoothed Probability</h3>
+      <p style="font-size:0.95em;">A <span class="highlight2">smoothed version</span> with exponential decay mirrors the hold-time behavior in the continuous domain:</p>
+
+      <div class="formula-small">
+        P<sub>smooth</sub>(t) = max( P<sub>raw</sub>(t), P<sub>smooth</sub>(t−1) · decay )
+      </div>
+
+      <div class="code" style="font-size:0.85em;"><span class="cmt"># Decay rate matches hold time</span>
+<span class="var">decay</span> = <span class="num">1.0</span> - (<span class="num">1.0</span> / hold_frames)
+
+<span class="cmt"># Per-frame update</span>
+<span class="var">smoothed</span> = <span class="fn">max</span>(<span class="var">prob</span>, <span class="var">prev_smoothed</span> * <span class="var">decay</span>)</div>
+
+      <div class="note" style="margin-top:15px;">
+        <strong>Use case:</strong> The probability curve enables <strong>threshold-free analysis</strong> on the dashboard — you can visually compare P(speech) against Audio VAD and choose optimal thresholds without re-running the algorithm.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 16: COLOR SCHEME -->
+<!-- ============================================================ -->
+<div class="slide" id="slide-16">
+  <h1>13. Color Scheme — Video Visualization</h1>
+  <div class="columns">
+    <div class="col" style="flex:1.2;">
+      <h2>Three Layers of Information</h2>
+      <table>
+        <tr>
+          <th>Color</th>
+          <th>Points</th>
+          <th>Meaning</th>
+        </tr>
+        <tr>
+          <td><span class="color-dot dot-white"></span> <strong>White</strong></td>
+          <td>Original (raw) mouth pts</td>
+          <td>Positions directly from 3DDFA — as the camera sees them</td>
+        </tr>
+        <tr>
+          <td><span class="color-dot dot-red"></span> <strong>Red</strong></td>
+          <td>Frontalized mouth pts</td>
+          <td>Speaker <strong>INACTIVE</strong> — not speaking</td>
+        </tr>
+        <tr>
+          <td><span class="color-dot dot-green"></span> <strong>Green</strong></td>
+          <td>Frontalized mouth pts</td>
+          <td>Speaker <strong>ACTIVE</strong> — speaking</td>
+        </tr>
+      </table>
+
+      <div class="code" style="margin-top:20px;"><span class="cmt"># Drawing points</span>
+<span class="cmt"># 1) Original — White</span>
+<span class="kw">for</span> pt <span class="kw">in</span> original_mouth_points:
+    cv2.<span class="fn">circle</span>(frame, pt, <span class="num">2</span>, (<span class="num">255</span>,<span class="num">255</span>,<span class="num">255</span>), -<span class="num">1</span>)
+
+<span class="cmt"># 2) Frontalized — Green/Red</span>
+<span class="var">color</span> = (<span class="num">0</span>,<span class="num">255</span>,<span class="num">0</span>) <span class="kw">if</span> is_speaking \
+   <span class="kw">else</span> (<span class="num">0</span>,<span class="num">0</span>,<span class="num">255</span>)
+<span class="kw">for</span> pt <span class="kw">in</span> frontalized_mouth_points:
+    cv2.<span class="fn">circle</span>(frame, pt, <span class="num">2</span>, <span class="var">color</span>, -<span class="num">1</span>)</div>
+    </div>
+    <div class="col">
+      <h2>Visual Interpretation</h2>
+      <div class="diagram">
+        <h3>Frontal speaker + talking</h3>
+        <p style="font-size:0.95em; margin:10px 0;">White and green points <span class="highlight">nearly overlap</span> (small rotation → small difference after frontalization)</p>
+      </div>
+      <div class="diagram" style="margin-top:12px;">
+        <h3>Rotated speaker + talking</h3>
+        <p style="font-size:0.95em; margin:10px 0;">White points: distorted by perspective<br>Green points: <span class="green">corrected</span> — show the true mouth shape</p>
+      </div>
+      <div class="diagram" style="margin-top:12px;">
+        <h3>Rotated speaker + silent</h3>
+        <p style="font-size:0.95em; margin:10px 0;">White points: distorted by perspective<br>Red points: <span class="red">corrected</span> but static — mouth is closed</p>
+      </div>
+      
+      <div class="note" style="margin-top:15px;">
+        <strong>The gap between white and colored points</strong> visually shows the degree of head rotation — the larger the rotation, the bigger the "drift" between original and frontalized points.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 17: ENROLLMENT AUDIO GENERATION -->
+<!-- ============================================================ -->
+<div class="slide" id="slide-17">
+  <h1>14. Enrollment Audio Generation</h1>
+  <div class="columns">
+    <div class="col">
+      <h2>Purpose</h2>
+      <p>Extract <span class="highlight">speech-only audio segments</span> from each recording for downstream tasks (speaker enrollment, verification, voice profiling).</p>
+
+      <h2 style="margin-top:20px;">Three VAD-Based Extraction Modes</h2>
+      <table>
+        <tr><th>Mode</th><th>Criterion</th><th>Output File</th></tr>
+        <tr>
+          <td><span class="highlight">Audio VAD</span></td>
+          <td>Audio energy-based VAD = active</td>
+          <td><code>{name}_audio_vad.wav</code></td>
+        </tr>
+        <tr>
+          <td><span class="highlight2">V-VAD</span></td>
+          <td>Visual VAD = active</td>
+          <td><code>{name}_vvad.wav</code></td>
+        </tr>
+        <tr>
+          <td><span class="green">Combined</span></td>
+          <td>Audio VAD <strong>OR</strong> V-VAD = active</td>
+          <td><code>{name}_audio_vvad.wav</code></td>
+        </tr>
+      </table>
+
+      <h2 style="margin-top:20px;">Processing Pipeline</h2>
+      <div class="pipeline">
+        <div class="pipe-step">📁 dumps_*/<br><small>.wav + .csv</small></div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-step accent2">🔍 Compute<br>V-VAD<br><small>frontalize + MAR</small></div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-step yellow-border">✂️ Segment<br><small>time → samples</small></div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-step green-border">🔗 Concat<br><small>enrollment/*.wav</small></div>
+      </div>
+    </div>
+    <div class="col">
+      <h2>Output Format</h2>
+      <div class="diagram">
+        <table>
+          <tr><td style="color:var(--muted); width:130px;">Sample Rate</td><td><span class="highlight">48,000 Hz</span></td></tr>
+          <tr><td style="color:var(--muted);">Bit Depth</td><td><span class="highlight">32-bit float</span> (PCM_F32LE)</td></tr>
+          <tr><td style="color:var(--muted);">Channels</td><td>Mono (1 ch)</td></tr>
+          <tr><td style="color:var(--muted);">Container</td><td>WAV</td></tr>
+        </table>
+      </div>
+
+      <h3 style="margin-top:15px;">Segmentation Logic</h3>
+      <div class="code" style="font-size:0.85em;"><span class="cmt"># Frame decisions → time segments</span>
+<span class="kw">for</span> each frame <span class="kw">at</span> time t:
+  <span class="kw">if</span> vad[t] == <span class="num">1</span> <span class="kw">and</span> <span class="kw">not</span> in_segment:
+    <span class="var">start</span> = t - dt/<span class="num">2</span>  <span class="cmt"># half-frame pad</span>
+  <span class="kw">if</span> vad[t] == <span class="num">0</span> <span class="kw">and</span> in_segment:
+    <span class="var">end</span> = t_prev + dt/<span class="num">2</span>
+    segments.<span class="fn">append</span>((<span class="var">start</span>, <span class="var">end</span>))
+
+<span class="cmt"># Extract & concatenate audio</span>
+<span class="kw">for</span> (s, e) <span class="kw">in</span> segments:
+  parts.<span class="fn">append</span>(audio[s*sr : e*sr])
+result = np.<span class="fn">concatenate</span>(parts)</div>
+
+      <div class="note" style="margin-top:15px;">
+        <strong>Why Combined (OR)?</strong> Audio VAD catches quiet speech that V-VAD misses, while V-VAD catches speech in noisy conditions where audio VAD fails. The union maximizes speech coverage for enrollment.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 18: PARAMETER TUNING & PERFORMANCE -->
+<!-- ============================================================ -->
+<div class="slide" id="slide-18">
+  <h1>15. Parameter Tuning & Performance Analysis</h1>
+  <div class="columns">
+    <div class="col">
+      <h2>Tuning Methodology</h2>
+      <p>A <span class="highlight">grid search</span> was performed across 12 recordings (6 speakers) with Audio VAD as ground truth. Key decisions:</p>
+      <ul>
+        <li><strong>Window 0.3s:</strong> Shorter window → faster reaction, sufficient frames for ZCR</li>
+        <li><strong>var_threshold 0.002:</strong> Raised from 0.0005 to filter low-amplitude noise</li>
+        <li><strong>mar_threshold 0.15:</strong> Raised from 0.12 to reject false detections from barely-open mouth</li>
+        <li><strong>ZCR ≥ 3:</strong> New condition — rejects monotonic movements (yawns, slow head turns)</li>
+        <li><strong>Hold 1.0s:</strong> Bridges natural inter-syllable pauses (200-400ms) during continuous speech</li>
+      </ul>
+      
+      <div class="note" style="margin-top:15px;">
+        <strong>Optimization target:</strong> Maximize <span class="highlight">F1 score</span> (harmonic mean of Precision and Recall) to balance FP and FN.
+      </div>
+    </div>
+    <div class="col">
+      <h2>Performance Comparison (avg. 12 recordings)</h2>
+      <table>
+        <tr>
+          <th>Metric</th>
+          <th>Baseline<br><small style="color:var(--muted);">(var+mean only)</small></th>
+          <th><span class="green">ZCR-Enhanced</span><br><small style="color:var(--muted);">(current)</small></th>
+        </tr>
+        <tr>
+          <td>F1 Score</td>
+          <td>52.7%</td>
+          <td><span class="green">59.1%</span> (+6.4pp)</td>
+        </tr>
+        <tr>
+          <td>Recall</td>
+          <td>98.6%</td>
+          <td>81.3%</td>
+        </tr>
+        <tr>
+          <td>Precision</td>
+          <td>38.0%</td>
+          <td><span class="green">50.3%</span> (+12.3pp)</td>
+        </tr>
+        <tr>
+          <td>False Positive Rate</td>
+          <td><span class="red">85.6%</span></td>
+          <td><span class="green">57.5%</span> (−28pp)</td>
+        </tr>
+        <tr>
+          <td>False Negative Rate</td>
+          <td>1.4%</td>
+          <td>18.7%</td>
+        </tr>
+        <tr>
+          <td>Agreement</td>
+          <td>47.3%</td>
+          <td><span class="green">56.8%</span> (+9.5pp)</td>
+        </tr>
+      </table>
+
+      <div class="note" style="margin-top:15px;">
+        <strong>Key improvement:</strong> False Positive rate reduced by <span class="highlight">28 percentage points</span> while maintaining 81% recall. The ZCR condition is the main driver — it rejects static open-mouth poses that the old algorithm misclassified as speech.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 19: LIMITATIONS & EDGE CASES -->
+<!-- ============================================================ -->
+<div class="slide" id="slide-19">
+  <h1>16. Known Limitations & Edge Cases</h1>
+  <div class="columns">
+    <div class="col">
+      <h2>Challenging Scenarios</h2>
+      <table>
+        <tr><th>Scenario</th><th>Issue</th><th>Impact</th></tr>
+        <tr>
+          <td>Very subtle speakers</td>
+          <td>MAR barely exceeds 0.15 during speech</td>
+          <td><span class="red">Higher FN</span> — some speech missed</td>
+        </tr>
+        <tr>
+          <td>Overlapping speech+silence MAR</td>
+          <td>Some speakers have similar MAR/variance during speech and silence</td>
+          <td><span class="red">Poor discrimination</span></td>
+        </tr>
+        <tr>
+          <td>Head movement noise</td>
+          <td>Rapid head motion creates variance spikes</td>
+          <td><span class="red">False positives</span> despite ZCR filter</td>
+        </tr>
+        <tr>
+          <td>Lip-sync to music</td>
+          <td>Rhythmic mouth motion without actual voice</td>
+          <td><span class="yellow">Cannot distinguish</span> — V-VAD will fire</td>
+        </tr>
+      </table>
+      
+      <div class="note" style="margin-top:20px;">
+        <strong>Fundamental limitation:</strong> V-VAD is based on <em>visual</em> cues only. It cannot detect whispering (minimal mouth movement) or distinguish lip-syncing from real speech. It should be used as a <em>complement</em> to audio-based VAD, not a replacement.
+      </div>
+    </div>
+    <div class="col">
+      <h2>Per-Speaker Analysis</h2>
+      <p style="margin-bottom:15px;">Deep analysis of 12 recordings revealed significant per-speaker variability:</p>
+      
+      <div class="diagram">
+        <h3>MAR during speech (by speaker)</h3>
+        <div style="font-size:0.95em; line-height:1.8;">
+          <div style="display:flex; align-items:center; margin:4px 0;">
+            <span style="min-width:120px; color:var(--muted);">Marek:</span>
+            <div style="background:var(--green); height:14px; border-radius:3px; width:65%;">&nbsp;</div>
+            <span style="margin-left:8px; font-size:0.85em;">0.33-0.43</span>
+          </div>
+          <div style="display:flex; align-items:center; margin:4px 0;">
+            <span style="min-width:120px; color:var(--muted);">Marta:</span>
+            <div style="background:var(--green); height:14px; border-radius:3px; width:60%;">&nbsp;</div>
+            <span style="margin-left:8px; font-size:0.85em;">0.37-0.39</span>
+          </div>
+          <div style="display:flex; align-items:center; margin:4px 0;">
+            <span style="min-width:120px; color:var(--muted);">Rafal:</span>
+            <div style="background:var(--green); height:14px; border-radius:3px; width:55%;">&nbsp;</div>
+            <span style="margin-left:8px; font-size:0.85em;">0.35</span>
+          </div>
+          <div style="display:flex; align-items:center; margin:4px 0;">
+            <span style="min-width:120px; color:var(--muted);">Michal:</span>
+            <div style="background:var(--yellow); height:14px; border-radius:3px; width:40%;">&nbsp;</div>
+            <span style="margin-left:8px; font-size:0.85em;">0.23-0.30</span>
+          </div>
+          <div style="display:flex; align-items:center; margin:4px 0;">
+            <span style="min-width:120px; color:var(--muted);">Raul:</span>
+            <div style="background:var(--red); height:14px; border-radius:3px; width:25%;">&nbsp;</div>
+            <span style="margin-left:8px; font-size:0.85em;">0.17</span>
+          </div>
+          <div style="display:flex; align-items:center; margin:4px 0;">
+            <span style="min-width:120px; color:var(--muted);">Demo speaker:</span>
+            <div style="background:var(--red); height:14px; border-radius:3px; width:22%;">&nbsp;</div>
+            <span style="margin-left:8px; font-size:0.85em;">0.15</span>
+          </div>
+        </div>
+        <p style="font-size:0.85em; color:var(--muted); margin-top:10px;">
+          Speakers with MAR < 0.20 during speech are hardest to detect — their mouth barely opens.
+        </p>
+      </div>
+
+      <h3 style="margin-top:15px;">Future Improvements</h3>
+      <ul>
+        <li>Adaptive per-speaker threshold calibration</li>
+        <li>Audio-visual fusion for improved accuracy</li>
+        <li>Machine learning-based V-VAD classifier</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 20: SUMMARY -->
+<!-- ============================================================ -->
+<div class="slide" id="slide-20">
+  <h1>17. Summary</h1>
+  <div class="columns">
+    <div class="col">
+      <h2>Face Frontalization</h2>
+      <div class="pipeline" style="flex-direction:column; align-items:stretch; gap:8px;">
+        <div class="pipe-step" style="width:100%;">1. Compute face axes from stable landmarks (eyes, nose, chin)</div>
+        <div class="pipe-step accent2" style="width:100%;">2. Build rotation matrix R = [x̂ | ŷ | ẑ]</div>
+        <div class="pipe-step yellow-border" style="width:100%;">3. Apply R<sup>T</sup> to centered mouth points</div>
+        <div class="pipe-step green-border" style="width:100%;">4. Restore centroid position → frontalized mouth</div>
+      </div>
+      
+      <h2 style="margin-top:25px;">Key Features</h2>
+      <ul>
+        <li>No external canonical 3D model needed</li>
+        <li>Uses data already available from 3DDFA</li>
+        <li>Preserves expression, removes rotation</li>
+        <li>Computational complexity: O(1) per frame</li>
+      </ul>
+    </div>
+    <div class="col">
+      <h2>Visual VAD (ZCR-Enhanced + Probability)</h2>
+      <div class="pipeline" style="flex-direction:column; align-items:stretch; gap:8px;">
+        <div class="pipe-step" style="width:100%;">1. Compute MAR from frontalized inner mouth pts</div>
+        <div class="pipe-step accent2" style="width:100%;">2. Sigmoid-normalize Var, Mean MAR, ZCR → P(speech)</div>
+        <div class="pipe-step yellow-border" style="width:100%;">3. Smooth probability with exponential decay</div>
+        <div class="pipe-step green-border" style="width:100%;">4. Hysteresis (hold 1.0s) → binary active/inactive</div>
+      </div>
+      
+      <h2 style="margin-top:15px;">Algorithm Parameters</h2>
+      <table style="font-size:0.95em;">
+        <tr><th>Parameter</th><th>Value</th><th>Effect of Increasing</th></tr>
+        <tr><td>window_seconds</td><td>0.3s</td><td>Smoother signal, slower reaction</td></tr>
+        <tr><td>var_threshold</td><td>0.002</td><td>Less sensitive (fewer FP)</td></tr>
+        <tr><td>mar_threshold</td><td>0.15</td><td>Ignores quiet speech (fewer FP)</td></tr>
+        <tr><td>min_zcr</td><td>3</td><td>Rejects non-rhythmic motion</td></tr>
+        <tr><td>hold_seconds</td><td>1.0s</td><td>Bridges pauses (fewer FN)</td></tr>
+        <tr><td>sigmoid_k</td><td>4.0</td><td>Sharper probability transition</td></tr>
+      </table>
+
+      <h2 style="margin-top:15px;">Enrollment Audio</h2>
+      <p style="font-size:0.95em;">3 WAV files per recording (48kHz, 32-bit float): Audio VAD only, V-VAD only, Combined (OR).</p>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- NAVIGATION -->
+<!-- ============================================================ -->
+<div class="slide-counter">
+  <span id="current-slide">1</span> / <span id="total-slides">20</span>
+</div>
+
+<div class="nav">
+  <button onclick="prevSlide()">← Previous</button>
+  <button onclick="nextSlide()">Next →</button>
+</div>
+
+<script>
+  let current = 1;
+  const total = document.querySelectorAll('.slide').length;
+  document.getElementById('total-slides').textContent = total;
+  
+  function showSlide(n) {
+    document.querySelectorAll('.slide').forEach(s => s.classList.remove('active'));
+    current = Math.max(1, Math.min(n, total));
+    document.getElementById('slide-' + current).classList.add('active');
+    document.getElementById('current-slide').textContent = current;
+  }
+  
+  function nextSlide() { showSlide(current + 1); }
+  function prevSlide() { showSlide(current - 1); }
+  
+  document.addEventListener('keydown', e => {
+    if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') { e.preventDefault(); nextSlide(); }
+    if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); prevSlide(); }
+    if (e.key === 'Home') { e.preventDefault(); showSlide(1); }
+    if (e.key === 'End') { e.preventDefault(); showSlide(total); }
+  });
+</script>
+
+</body>
+</html>
