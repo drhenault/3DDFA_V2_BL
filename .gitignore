@@ -58,6 +58,8 @@ facenet/dist/
 facenet/downloads/
 facenet/eggs/
 facenet/.eggs/
+facenet/models/*
+!facenet/models/.gitkeep
 facenet/lib/
 facenet/lib64/
 facenet/parts/
