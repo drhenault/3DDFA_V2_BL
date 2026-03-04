@@ -35,6 +35,7 @@ inputs/*
 outputs/*
 !outputs/.gitkeep
 dumps/*
+!dumps/.gitkeep
 enrollment-avatars/*
 *.npz
 !enrollment-avatars/.gitkeep
