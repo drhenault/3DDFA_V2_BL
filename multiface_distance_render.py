@@ -1563,6 +1563,7 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
         show_markers: Whether to show facial landmark markers
         speaker_lookup: dict (seconds, face_idx) -> speaker_name (from speaker_identification.csv)
         avatars: dict speaker_name -> BGR image (loaded from enrollment-avatars/)
+        vvad_model_path: Path to trained V-VAD DNN model (.pt). If None or missing, use MAR heuristic.
     """
     print(f"\nReading video: {video_path}")
     reader = imageio.get_reader(video_path)
@@ -1589,7 +1590,7 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
     
     print("\nRendering annotated video...")
     
-    # Initialize Visual VAD detector
+    # Initialize Visual VAD detector (DNN if model exists, else MAR heuristic)
     if vvad_model_path and os.path.exists(vvad_model_path):
         print(f"  Loading DNN-based V-VAD model...")
         vvad_detector = DNN_VVAD_Detector(vvad_model_path, hold_seconds=1.0, fps=fps)
@@ -1872,7 +1873,7 @@ def main(args):
         show_markers=args.show_markers,
         speaker_lookup=speaker_lookup,
         avatars=avatars,
-        vvad_model_path=args.vvad_model,
+        vvad_model_path=getattr(args, 'vvad_model', None)
     )
     
     print("\n" + "="*60)
@@ -1916,10 +1917,6 @@ Output:
                        help='Directory containing CSV dump files (default: dumps)')
     parser.add_argument('--avatars-dir', type=str, default='enrollment-avatars',
                        help='Directory containing speaker avatar images (default: enrollment-avatars)')
-    parser.add_argument('--vvad_model', type=str, default='vvad_dnn_model.pt',
-                       help='Path to trained V-VAD DNN model checkpoint '
-                            '(default: vvad_dnn_model.pt). '
-                            'Falls back to MAR heuristic if file not found.')
     parser.add_argument('--show-markers', dest='show_markers', action='store_true',
                        help='Show face position markers on video (default)')
     parser.add_argument('--no-markers', dest='show_markers', action='store_false',
@@ -1930,6 +1927,10 @@ Output:
                        help='Min cosine similarity to match face to existing track (default: 0.3)')
     parser.add_argument('--embedding-drop-frames', type=int, default=60,
                        help='Drop track after this many frames unseen (default: 60)')
+    parser.add_argument('--vvad_model', type=str, default='vvad_dnn_model.pt',
+                       help='Path to trained V-VAD DNN model checkpoint '
+                            '(default: vvad_dnn_model.pt). '
+                            'Falls back to MAR heuristic if file not found.')
     parser.set_defaults(show_markers=True)
 
     args = parser.parse_args()

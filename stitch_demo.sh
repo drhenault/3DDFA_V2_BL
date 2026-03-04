@@ -6,9 +6,9 @@
 
 # Set up variables (absolute paths)
 TDDFA_V2_DIRECTORY_PATH="$(pwd)/"
-VIDEO_PATH="$(pwd)/inputs/example_1.mp4"
+VIDEO_PATH="$(pwd)/inputs/example_4.mp4"
 AUDIO_PIPELINE_DIRECTORY_PATH="/work/user_data/hboratyn/repos/leapfox/"
-FACENET_DIRECTORY_PATH="/work/user_data/hboratyn/3ddfa_v2/facenet/"
+FACENET_DIRECTORY_PATH="$(pwd)/facenet/"
 
 # Obtain audio from video and save to the same directory
 python3 extract_wav_from_video.py -i "$VIDEO_PATH"
@@ -49,6 +49,6 @@ python3 extract_face_embeddings.py -i "$VIDEO_PATH" --dumps_dir dumps -o face_em
 python3 reindex_face_ids.py --dumps_dir dumps --embeddings face_embeddings.npz
 
 OUTPUT_NAME="outputs/$(basename "${VIDEO_PATH%.*}")_output.${VIDEO_PATH##*.}"
-python3 multiface_distance_render.py -i "$VIDEO_PATH" -o "$OUTPUT_NAME" --dumps_dir dumps
+python3 multiface_distance_render.py -i "$VIDEO_PATH" -o "$OUTPUT_NAME" --dumps_dir dumps --vvad_model=vvad_dnn_model.pt
 deactivate
 echo "Done!"

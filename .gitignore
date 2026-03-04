@@ -34,6 +34,7 @@ inputs/*
 outputs/*
 dumps/*
 enrollment-avatars/*
+*.npz
 !enrollment-avatars/.gitkeep
 
 # Facenet
