@@ -31,7 +31,9 @@ how_to_make_video_demos.txt
 test_pr*.py
 demo_for_*.py
 inputs/*
+!inputs/.gitkeep
 outputs/*
+!outputs/.gitkeep
 dumps/*
 enrollment-avatars/*
 *.npz

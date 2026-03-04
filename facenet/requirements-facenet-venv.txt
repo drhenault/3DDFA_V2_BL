@@ -1,0 +1,12 @@
+# Dependencies for running with facenet-venv (Python 3.8+).
+# Uses TensorFlow 2.x; the scripts use compat.v1 for API compatibility.
+tensorflow>=2.0
+scipy
+scikit-learn
+opencv-python
+h5py
+matplotlib
+Pillow
+requests
+psutil
+six
