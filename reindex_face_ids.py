@@ -2,13 +2,22 @@
 # coding: utf-8
 
 """
-Reindex face IDs in dump CSVs using embedding-based stable track assignment.
+Reindex face IDs in dump CSVs using stable track assignment.
 
 process_video.py assigns face_idx per frame based on detection order (tied to
 face distance), so IDs can swap when people change relative position.  This
-script computes persistent track IDs from precomputed face embeddings and
-rewrites the CSV dumps in-place so that every downstream consumer (rendering
-scripts, analysis) sees stable identities.
+script computes persistent track IDs and rewrites the CSV dumps in-place so
+that every downstream consumer (rendering scripts, analysis) sees stable
+identities.
+
+Two tracking strategies are available:
+  1. Embedding-based:  Uses precomputed face embeddings (.npz) to match faces
+     across frames by cosine similarity.  Requires a real face recognition
+     model to produce meaningful embeddings.
+  2. Position-based (fallback):  Uses the average X, Y landmark positions from
+     mouth_position.csv to match faces by spatial proximity.  Activated
+     automatically when the embeddings are all-zero placeholders or when
+     --use-position-tracking is set.
 
 Affected files (must contain a face_idx column):
   - mouth_position.csv
@@ -73,6 +82,19 @@ def _assignment_by_similarity(prev_track_embs, curr_face_embs,
     return result
 
 
+def _are_embeddings_placeholder(embeddings):
+    """
+    Detect whether embeddings are placeholder (all-zero) vectors.
+    When extract_face_embeddings.py runs without a real model, it writes
+    np.zeros(128) for every face — these are useless for similarity matching.
+    """
+    if embeddings.size == 0:
+        return True
+    norms = np.linalg.norm(embeddings, axis=1)
+    # If >90 % of vectors are near-zero the data is placeholder
+    return float(np.mean(norms < 1e-8)) > 0.9
+
+
 def compute_assignment_map(embeddings, seconds_arr, face_idx_arr,
                            df_face_count, similarity_threshold=0.3,
                            drop_after_frames=60):
@@ -117,6 +139,133 @@ def compute_assignment_map(embeddings, seconds_arr, face_idx_arr,
         for tid in list(tracks.keys()):
             if frame_idx - tracks[tid][1] >= drop_after_frames:
                 del tracks[tid]
+
+    return assignment_map
+
+
+# ---- Position-based tracking (fallback when embeddings are unavailable) ----
+
+def compute_assignment_map_by_position(df_mouth, df_face_count,
+                                       max_distance=300.0,
+                                       ema_alpha=0.3,
+                                       drop_after_frames=60):
+    """
+    Build (rounded_seconds, orig_face_idx) -> stable_track_id mapping
+    by matching face centroid positions (average X, Y of all 68 landmarks)
+    across consecutive frames.
+
+    This is the fallback when face embeddings are placeholder (all-zero).
+    Uses exponential moving average of centroids and the Hungarian algorithm
+    for optimal assignment.
+
+    Args:
+        df_mouth: DataFrame from mouth_position.csv (columns: seconds,
+                  face_idx, point_type, x, y, z)
+        df_face_count: DataFrame from face_count.csv (seconds, face_count)
+        max_distance: Maximum pixel distance to match a detection to a track.
+        ema_alpha: EMA smoothing factor for tracked centroid positions.
+        drop_after_frames: Remove a track after this many unseen frames.
+
+    Returns:
+        dict: (rounded_seconds, orig_face_idx) -> stable_track_id
+    """
+    # Pre-compute face centroids per (seconds, face_idx)
+    # Use mean of all landmark X, Y coordinates as the centroid
+    centroids = (
+        df_mouth
+        .groupby(['seconds', 'face_idx'])
+        .agg(cx=('x', 'mean'), cy=('y', 'mean'))
+        .reset_index()
+    )
+    centroid_lookup = {}
+    for _, row in centroids.iterrows():
+        key = (round(float(row['seconds']), 6), int(row['face_idx']))
+        centroid_lookup[key] = (float(row['cx']), float(row['cy']))
+
+    frames = df_face_count.sort_values('seconds')[['seconds', 'face_count']].values
+    assignment_map = {}
+    # tracks: {track_id: {'cx': float, 'cy': float, 'last_frame': int}}
+    tracks = {}
+    next_track_id = 0
+
+    for frame_idx, (seconds, face_count) in enumerate(frames):
+        sec_k = round(float(seconds), 6)
+        n_det = int(face_count)
+
+        # Collect centroids for all detected faces in this frame
+        curr_centroids = []  # list of (face_idx, cx, cy)
+        for fi in range(n_det):
+            key = (sec_k, fi)
+            if key in centroid_lookup:
+                cx, cy = centroid_lookup[key]
+                curr_centroids.append((fi, cx, cy))
+
+        if not curr_centroids:
+            # Cleanup stale tracks
+            to_drop = [tid for tid, t in tracks.items()
+                       if frame_idx - t['last_frame'] >= drop_after_frames]
+            for tid in to_drop:
+                del tracks[tid]
+            continue
+
+        n_curr = len(curr_centroids)
+
+        # First frame or no active tracks → initialise
+        active = [(tid, t) for tid, t in tracks.items()
+                  if frame_idx - t['last_frame'] < drop_after_frames]
+        n_active = len(active)
+
+        if n_active == 0:
+            for fi, cx, cy in curr_centroids:
+                tid = next_track_id
+                next_track_id += 1
+                tracks[tid] = {'cx': cx, 'cy': cy, 'last_frame': frame_idx}
+                assignment_map[(sec_k, fi)] = tid
+            continue
+
+        # Build cost matrix: curr_centroids x active_tracks (Euclidean dist)
+        cost = np.empty((n_curr, n_active), dtype=np.float64)
+        for i, (_, dcx, dcy) in enumerate(curr_centroids):
+            for j, (_, t) in enumerate(active):
+                cost[i, j] = np.sqrt((dcx - t['cx'])**2 +
+                                     (dcy - t['cy'])**2)
+
+        # Pad to square
+        dim = max(n_curr, n_active)
+        pad = np.full((dim, dim), max_distance * 2, dtype=np.float64)
+        pad[:n_curr, :n_active] = cost
+        rows, cols = linear_sum_assignment(pad)
+
+        matched_dets = set()
+        for r, c in zip(rows, cols):
+            if r < n_curr and c < n_active and cost[r, c] <= max_distance:
+                fi = curr_centroids[r][0]
+                cx, cy = curr_centroids[r][1], curr_centroids[r][2]
+                tid = active[c][0]
+                assignment_map[(sec_k, fi)] = tid
+                matched_dets.add(r)
+                # Update EMA
+                tracks[tid]['cx'] = (ema_alpha * cx +
+                                     (1 - ema_alpha) * tracks[tid]['cx'])
+                tracks[tid]['cy'] = (ema_alpha * cy +
+                                     (1 - ema_alpha) * tracks[tid]['cy'])
+                tracks[tid]['last_frame'] = frame_idx
+
+        # New tracks for unmatched detections
+        for i in range(n_curr):
+            if i not in matched_dets:
+                fi = curr_centroids[i][0]
+                cx, cy = curr_centroids[i][1], curr_centroids[i][2]
+                tid = next_track_id
+                next_track_id += 1
+                tracks[tid] = {'cx': cx, 'cy': cy, 'last_frame': frame_idx}
+                assignment_map[(sec_k, fi)] = tid
+
+        # Cleanup stale tracks
+        to_drop = [tid for tid, t in tracks.items()
+                   if frame_idx - t['last_frame'] >= drop_after_frames]
+        for tid in to_drop:
+            del tracks[tid]
 
     return assignment_map
 
@@ -167,7 +316,7 @@ def _reindex_speaker_csv(df, assignment_map, ref_seconds):
 def main():
     parser = argparse.ArgumentParser(
         description='Reindex face IDs in dump CSVs with stable '
-                    'embedding-based track IDs.')
+                    'track IDs (embedding-based or position-based).')
     parser.add_argument('--dumps_dir', type=str, default='dumps',
                         help='Directory with CSV dump files')
     parser.add_argument('--embeddings', type=str, default='face_embeddings.npz',
@@ -178,6 +327,16 @@ def main():
     parser.add_argument('--drop-after-frames', type=int, default=60,
                         help='Drop a track after this many unseen frames '
                              '(default: 60)')
+    parser.add_argument('--use-position-tracking', action='store_true',
+                        default=False,
+                        help='Force position-based tracking instead of '
+                             'embedding-based (uses X, Y landmark centroids)')
+    parser.add_argument('--max-distance', type=float, default=300.0,
+                        help='Max pixel distance for position-based matching '
+                             '(default: 300)')
+    parser.add_argument('--ema-alpha', type=float, default=0.3,
+                        help='EMA smoothing factor for position tracking '
+                             '(default: 0.3)')
     args = parser.parse_args()
 
     dumps = Path(args.dumps_dir)
@@ -185,16 +344,6 @@ def main():
 
     print("Reindexing face IDs with stable track assignment")
     print("=" * 55)
-
-    # Load embeddings
-    if not emb_path.exists():
-        print(f"  Error: embeddings file not found: {emb_path}")
-        return
-    data = np.load(emb_path, allow_pickle=False)
-    embeddings = np.asarray(data['embeddings'], dtype=np.float64)
-    seconds_arr = np.asarray(data['seconds'], dtype=np.float64).ravel()
-    face_idx_arr = np.asarray(data['face_idx'], dtype=np.int64).ravel()
-    print(f"  Loaded {len(seconds_arr)} embeddings from {emb_path}")
 
     # Load face_count (needed for frame iteration order)
     fc_path = dumps / 'face_count.csv'
@@ -204,19 +353,62 @@ def main():
     df_face_count = pd.read_csv(fc_path)
     ref_seconds = np.sort(df_face_count['seconds'].values.astype(np.float64))
 
+    # Load mouth_position (needed for position-based tracking fallback)
+    mp_path = dumps / 'mouth_position.csv'
+    df_mouth_orig = None
+    if mp_path.exists():
+        df_mouth_orig = pd.read_csv(mp_path)
+
+    # Decide which tracking strategy to use
+    use_position = args.use_position_tracking
+    embeddings = None
+    seconds_arr = None
+    face_idx_arr = None
+
+    if not use_position and emb_path.exists():
+        data = np.load(emb_path, allow_pickle=False)
+        embeddings = np.asarray(data['embeddings'], dtype=np.float64)
+        seconds_arr = np.asarray(data['seconds'], dtype=np.float64).ravel()
+        face_idx_arr = np.asarray(data['face_idx'], dtype=np.int64).ravel()
+        print(f"  Loaded {len(seconds_arr)} embeddings from {emb_path}")
+
+        # Auto-detect placeholder embeddings (all-zero from dummy model)
+        if _are_embeddings_placeholder(embeddings):
+            print("  ⚠ Embeddings are all-zero (placeholder) — they cannot "
+                  "distinguish faces.")
+            print("    Falling back to position-based tracking using "
+                  "landmark centroids.")
+            use_position = True
+    elif not use_position:
+        print(f"  Embeddings file not found: {emb_path}")
+        print("  Falling back to position-based tracking.")
+        use_position = True
+
     # Compute stable assignment
-    assignment_map = compute_assignment_map(
-        embeddings, seconds_arr, face_idx_arr, df_face_count,
-        similarity_threshold=args.similarity_threshold,
-        drop_after_frames=args.drop_after_frames)
+    if use_position:
+        if df_mouth_orig is None:
+            print(f"  Error: {mp_path} not found — cannot do position tracking")
+            return
+        print("  Strategy: POSITION-BASED (landmark centroid tracking)")
+        assignment_map = compute_assignment_map_by_position(
+            df_mouth_orig, df_face_count,
+            max_distance=args.max_distance,
+            ema_alpha=args.ema_alpha,
+            drop_after_frames=args.drop_after_frames)
+    else:
+        print("  Strategy: EMBEDDING-BASED (cosine similarity)")
+        assignment_map = compute_assignment_map(
+            embeddings, seconds_arr, face_idx_arr, df_face_count,
+            similarity_threshold=args.similarity_threshold,
+            drop_after_frames=args.drop_after_frames)
+
     n_reassigned = sum(1 for (_, fi), tid in assignment_map.items() if fi != tid)
     print(f"  Computed assignment map: {len(assignment_map)} entries, "
           f"{n_reassigned} face_idx values changed")
 
     # Reindex mouth_position.csv
-    mp_path = dumps / 'mouth_position.csv'
     if mp_path.exists():
-        df = pd.read_csv(mp_path)
+        df = df_mouth_orig if df_mouth_orig is not None else pd.read_csv(mp_path)
         df = _reindex_df(df, assignment_map)
         df.to_csv(mp_path, index=False)
         print(f"  Reindexed {mp_path}")

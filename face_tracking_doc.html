@@ -1,0 +1,839 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Face Tracking Stabilization — Technical Documentation</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --bg2: #1e293b;
+    --card: #1e293b;
+    --card-border: #334155;
+    --accent: #38bdf8;
+    --accent2: #a78bfa;
+    --green: #4ade80;
+    --red: #f87171;
+    --yellow: #fbbf24;
+    --orange: #fb923c;
+    --white: #f1f5f9;
+    --muted: #94a3b8;
+    --code-bg: #0d1117;
+    --link: #60a5fa;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--white);
+    line-height: 1.7;
+    font-size: 16px;
+  }
+
+  /* ── Navigation ─────────────────────────────────────────────── */
+  nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    background: rgba(15, 23, 42, 0.92);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--card-border);
+    padding: 0 40px;
+    display: flex; align-items: center; height: 60px;
+  }
+  nav .logo {
+    font-weight: 800; font-size: 1.15em;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    margin-right: 40px; white-space: nowrap;
+  }
+  nav .nav-links { display: flex; gap: 6px; flex-wrap: wrap; }
+  nav .nav-links a {
+    color: var(--muted); text-decoration: none; font-size: 0.85em;
+    padding: 6px 12px; border-radius: 6px; transition: all .2s;
+  }
+  nav .nav-links a:hover { color: var(--white); background: var(--bg2); }
+
+  /* ── Main Container ─────────────────────────────────────────── */
+  .container {
+    max-width: 1060px; margin: 0 auto;
+    padding: 100px 32px 80px;
+  }
+
+  /* ── Hero ────────────────────────────────────────────────────── */
+  .hero {
+    text-align: center; padding: 60px 0 50px;
+  }
+  .hero h1 {
+    font-size: 2.8em; font-weight: 800; line-height: 1.15;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .hero .subtitle {
+    color: var(--muted); font-size: 1.15em; margin-top: 16px;
+  }
+  .hero .badges { margin-top: 24px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+  .badge {
+    display: inline-block; padding: 4px 14px; border-radius: 20px;
+    font-size: .78em; font-weight: 600; letter-spacing: .3px;
+  }
+  .badge.blue   { background: rgba(56,189,248,.15); color: var(--accent); border: 1px solid rgba(56,189,248,.3); }
+  .badge.purple { background: rgba(167,139,250,.15); color: var(--accent2); border: 1px solid rgba(167,139,250,.3); }
+  .badge.green  { background: rgba(74,222,128,.15); color: var(--green); border: 1px solid rgba(74,222,128,.3); }
+
+  /* ── Section ─────────────────────────────────────────────────── */
+  section { margin-bottom: 56px; }
+  section h2 {
+    font-size: 1.65em; font-weight: 700; margin-bottom: 18px;
+    padding-bottom: 10px; border-bottom: 2px solid var(--card-border);
+    scroll-margin-top: 80px;
+  }
+  section h2 .num {
+    color: var(--accent); margin-right: 10px; font-weight: 800;
+  }
+  section h3 {
+    font-size: 1.2em; font-weight: 600; color: var(--accent2);
+    margin: 28px 0 12px;
+  }
+  p, li { color: var(--white); margin-bottom: 10px; }
+
+  /* ── Cards ───────────────────────────────────────────────────── */
+  .card {
+    background: var(--card); border: 1px solid var(--card-border);
+    border-radius: 12px; padding: 28px 30px; margin: 20px 0;
+  }
+  .card.highlight { border-left: 4px solid var(--accent); }
+  .card.warn      { border-left: 4px solid var(--yellow); }
+  .card.success   { border-left: 4px solid var(--green); }
+  .card h4 { font-size: 1.05em; margin-bottom: 10px; font-weight: 700; }
+  .card h4 .icon { margin-right: 8px; }
+
+  /* ── Columns ─────────────────────────────────────────────────── */
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 740px) { .cols { grid-template-columns: 1fr; } }
+
+  /* ── Code blocks ─────────────────────────────────────────────── */
+  pre {
+    background: var(--code-bg); border: 1px solid var(--card-border);
+    border-radius: 10px; padding: 20px 24px; overflow-x: auto;
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: .88em; line-height: 1.6; margin: 14px 0;
+    color: #c9d1d9;
+  }
+  code {
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: .9em; background: rgba(56,189,248,.1);
+    padding: 2px 6px; border-radius: 4px; color: var(--accent);
+  }
+  pre code { background: none; padding: 0; color: inherit; }
+
+  .kw  { color: #ff7b72; }   /* keyword */
+  .fn  { color: #d2a8ff; }   /* function */
+  .str { color: #a5d6ff; }   /* string */
+  .cmt { color: #8b949e; font-style: italic; }  /* comment */
+  .num { color: #79c0ff; }   /* number */
+  .var { color: #ffa657; }   /* variable highlight */
+
+  /* ── Diagram / visual boxes ──────────────────────────────────── */
+  .diagram {
+    background: var(--code-bg); border: 1px solid var(--card-border);
+    border-radius: 12px; padding: 30px; margin: 20px 0;
+    font-family: 'Cascadia Code', 'Fira Code', monospace;
+    font-size: .82em; line-height: 1.55; overflow-x: auto;
+    white-space: pre; color: var(--muted);
+  }
+  .diagram .hl { color: var(--accent); font-weight: 700; }
+  .diagram .hl2 { color: var(--accent2); font-weight: 700; }
+  .diagram .hlg { color: var(--green); font-weight: 700; }
+
+  /* ── Math blocks ─────────────────────────────────────────────── */
+  .math-block {
+    background: var(--code-bg); border: 1px solid var(--card-border);
+    border-radius: 10px; padding: 22px 28px; margin: 16px 0;
+    text-align: center; font-size: 1.08em; color: var(--white);
+    font-family: 'Cambria Math', 'Latin Modern Math', 'STIX Two Math', Georgia, serif;
+    letter-spacing: .3px;
+  }
+  .math-block .label {
+    display: block; font-size: .78em; color: var(--muted);
+    margin-top: 8px; font-family: 'Segoe UI', sans-serif;
+  }
+
+  /* ── Table ───────────────────────────────────────────────────── */
+  table {
+    width: 100%; border-collapse: collapse; margin: 16px 0;
+    font-size: .92em;
+  }
+  th, td {
+    text-align: left; padding: 12px 16px;
+    border-bottom: 1px solid var(--card-border);
+  }
+  th { color: var(--accent); font-weight: 700; font-size: .88em; text-transform: uppercase; letter-spacing: .5px; }
+  tr:hover td { background: rgba(56,189,248,.04); }
+
+  /* ── List ─────────────────────────────────────────────────────── */
+  ul, ol { padding-left: 24px; margin-bottom: 14px; }
+  li { margin-bottom: 6px; }
+  li::marker { color: var(--accent); }
+
+  /* ── Footer ──────────────────────────────────────────────────── */
+  footer {
+    text-align: center; padding: 40px 0 30px;
+    color: var(--muted); font-size: .85em;
+    border-top: 1px solid var(--card-border);
+  }
+
+  /* ── Scroll-to-top ───────────────────────────────────────────── */
+  .top-btn {
+    position: fixed; bottom: 30px; right: 30px;
+    width: 44px; height: 44px; border-radius: 50%;
+    background: var(--accent); color: var(--bg);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.3em; font-weight: 800; cursor: pointer;
+    text-decoration: none; box-shadow: 0 4px 20px rgba(56,189,248,.35);
+    transition: transform .2s;
+  }
+  .top-btn:hover { transform: translateY(-3px); }
+
+  /* ── Separator ───────────────────────────────────────────────── */
+  hr.sep {
+    border: none; height: 1px; background: var(--card-border);
+    margin: 48px 0;
+  }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════ NAVIGATION ═══════════════════ -->
+<nav>
+  <div class="logo">FaceTrack Docs</div>
+  <div class="nav-links">
+    <a href="#problem">Problem</a>
+    <a href="#architecture">Architecture</a>
+    <a href="#hungarian">Hungarian Algorithm</a>
+    <a href="#ema">EMA</a>
+    <a href="#layer1">Layer 1 — process_video</a>
+    <a href="#layer2">Layer 2 — reindex</a>
+    <a href="#pipeline">Pipeline</a>
+    <a href="#params">Parameters</a>
+  </div>
+</nav>
+
+<!-- ═══════════════════ HERO ═══════════════════════ -->
+<div class="container">
+
+<div class="hero">
+  <h1>Face Tracking Stabilization</h1>
+  <p class="subtitle">
+    Technical documentation of the face index (<code>face_idx</code>) stabilization
+    mechanism in the 3DDFA_V2 video processing pipeline
+  </p>
+  <div class="badges">
+    <span class="badge blue">Hungarian Algorithm</span>
+    <span class="badge purple">Exponential Moving Average</span>
+    <span class="badge green">Dual-Layer Tracking</span>
+  </div>
+</div>
+
+<hr class="sep">
+
+<!-- ═══════════════════ 1. PROBLEM ═══════════════════ -->
+<section id="problem">
+  <h2><span class="num">1.</span> Problem Statement</h2>
+
+  <p>
+    The <strong>FaceBoxes</strong> face detector returns a list of detected bounding boxes each frame,
+    sorted by internal criteria (e.g. confidence score, area). When two speakers are at a
+    <strong>similar distance from the camera</strong>, their order in the detection list can change
+    from frame to frame:
+  </p>
+
+  <div class="diagram">
+<span class="cmt">  Frame 100:</span>   boxes = [<span class="hl">Person A</span>, <span class="hl2">Person B</span>]   →  face_idx: A=<span class="hl">0</span>, B=<span class="hl2">1</span>
+<span class="cmt">  Frame 101:</span>   boxes = [<span class="hl2">Person B</span>, <span class="hl">Person A</span>]   →  face_idx: B=<span class="hl">0</span>, A=<span class="hl2">1</span>   ← <span style="color:var(--red);">SWAP!</span>
+<span class="cmt">  Frame 102:</span>   boxes = [<span class="hl">Person A</span>, <span class="hl2">Person B</span>]   →  face_idx: A=<span class="hl">0</span>, B=<span class="hl2">1</span>
+<span class="cmt">  Frame 103:</span>   boxes = [<span class="hl2">Person B</span>, <span class="hl">Person A</span>]   →  face_idx: B=<span class="hl">0</span>, A=<span class="hl2">1</span>   ← <span style="color:var(--red);">SWAP!</span></div>
+
+  <div class="card warn">
+    <h4><span class="icon">⚠️</span> Consequences</h4>
+    <p>
+      The CSV output files (<code>mouth_position.csv</code>, <code>face_position.csv</code>) contain
+      <strong>mixed-up coordinates</strong> — Person A's data ends up in rows labelled <code>face_idx=1</code>
+      and vice versa. This makes it impossible to correctly track lip movement, face orientation,
+      and speaker identification downstream.
+    </p>
+  </div>
+</section>
+
+<!-- ═══════════════════ 2. ARCHITECTURE ═══════════════════ -->
+<section id="architecture">
+  <h2><span class="num">2.</span> Solution Architecture</h2>
+
+  <p>
+    A <strong>dual-layer stabilization</strong> approach is employed: once during video processing
+    (pre-processing) and once as a post-processing correction on the CSV files.
+  </p>
+
+  <div class="diagram">
+<span class="hl">┌────────────────────────────────────────────────────────────────────────┐</span>
+<span class="hl">│                         LAYER 1  (Real-Time)                           │</span>
+<span class="hl">│                         process_video.py                               │</span>
+<span class="hl">│                                                                        │</span>
+<span class="hl">│   FaceBoxes  ──→  FaceTracker.stabilize()  ──→  stable boxes  ──→  CSV │</span>
+<span class="hl">│                   (EMA + Hungarian Algorithm)                          │</span>
+<span class="hl">└────────────────────────────────────────────────────────────────────────┘</span>
+                                    │
+                              write to CSV
+                                    ▼
+<span class="hl2">┌────────────────────────────────────────────────────────────────────────┐</span>
+<span class="hl2">│                         LAYER 2  (Post-Processing)                     │</span>
+<span class="hl2">│                         reindex_face_ids.py                            │</span>
+<span class="hl2">│                                                                        │</span>
+<span class="hl2">│   Embeddings ──→ cosine similarity tracking  ──→  overwrite CSV        │</span>
+<span class="hl2">│        or                                                              │</span>
+<span class="hl2">│   Landmarks  ──→ position-based tracking      ──→  overwrite CSV       │</span>
+<span class="hl2">│                  (EMA + Hungarian Algorithm)                           │</span>
+<span class="hl2">└────────────────────────────────────────────────────────────────────────┘</span></div>
+
+  <div class="cols">
+    <div class="card highlight">
+      <h4>Layer 1 — Pre-processing</h4>
+      <p>
+        The <code>FaceTracker</code> class in <code>process_video.py</code> stabilizes the bounding-box
+        order <strong>before</strong> any data is written to CSV. It operates on bounding-box centroids
+        smoothed with an Exponential Moving Average (EMA).
+      </p>
+    </div>
+    <div class="card highlight">
+      <h4>Layer 2 — Post-processing</h4>
+      <p>
+        The <code>reindex_face_ids.py</code> script corrects <code>face_idx</code> values in the
+        finished CSV files. It prefers face embeddings (cosine similarity), and when those are
+        unavailable it falls back to position-based tracking (centroid of 68 landmarks).
+      </p>
+    </div>
+  </div>
+</section>
+
+<hr class="sep">
+
+<!-- ═══════════════════ 3. HUNGARIAN ALGORITHM ═══════════════ -->
+<section id="hungarian">
+  <h2><span class="num">3.</span> The Hungarian Algorithm</h2>
+
+  <p>
+    The Hungarian Algorithm (also known as the <strong>Kuhn-Munkres method</strong>) is a combinatorial
+    optimization algorithm that solves the <strong>optimal assignment problem</strong> in polynomial
+    time O(n³).
+  </p>
+
+  <h3>The Assignment Problem</h3>
+  <p>
+    We have <em>n</em> face detections in the current frame and <em>m</em> existing tracks from
+    previous frames. For each pair (detection <em>i</em>, track <em>j</em>) we compute a
+    <strong>cost</strong> — in our case, the Euclidean distance between centroids. We want to find an
+    assignment of detections to tracks that <strong>minimizes the total cost</strong>:
+  </p>
+
+  <div class="math-block">
+    minimize &nbsp; &Sigma;<sub>assignments</sub> &nbsp; cost(detection<sub>i</sub>, track<sub>j</sub>)
+    <span class="label">Each detection and each track may be assigned at most once.</span>
+  </div>
+
+  <h3>Cost Matrix</h3>
+  <p>
+    We construct a matrix <strong>C</strong> of dimensions <em>n × m</em>, where:
+  </p>
+
+  <div class="math-block">
+    C[i, j] = &radic;( (cx<sub>i</sub> − tx<sub>j</sub>)² + (cy<sub>i</sub> − ty<sub>j</sub>)² )
+    <span class="label">
+      cx, cy = detection centroid; &nbsp; tx, ty = smoothed track position (EMA)
+    </span>
+  </div>
+
+  <div class="diagram">
+<span class="cmt">  Example cost matrix (distance in pixels):</span>
+
+                   Track 0      Track 1
+                  (EMA pos)    (EMA pos)
+  Detection 0  │  <span class="hlg">  12.5  </span>  │   187.3   │
+  Detection 1  │   203.1    │  <span class="hlg">  18.7  </span>  │
+
+  <span class="cmt">Optimal assignment (minimum total cost = 12.5 + 18.7 = 31.2):</span>
+    Detection 0  →  Track 0  <span class="hlg">✓</span>
+    Detection 1  →  Track 1  <span class="hlg">✓</span></div>
+
+  <h3>Padding to a Square Matrix</h3>
+  <p>
+    The <code>linear_sum_assignment</code> function from <code>scipy</code> works with rectangular
+    matrices. When the number of detections ≠ the number of tracks, we pad the matrix to size
+    <code>max(n, m) × max(n, m)</code> with values of <code>max_distance × 2</code>, so that
+    "dummy" assignments carry a prohibitively high cost and are never preferred.
+  </p>
+
+  <div class="card highlight">
+    <h4><span class="icon">📐</span> scipy Implementation</h4>
+    <p>
+      We use <code>scipy.optimize.linear_sum_assignment(cost_matrix)</code>, which returns the
+      optimal row indices (<code>row_ind</code>) and column indices (<code>col_ind</code>):
+    </p>
+<pre><code><span class="kw">from</span> scipy.optimize <span class="kw">import</span> <span class="fn">linear_sum_assignment</span>
+
+<span class="cmt"># Build cost matrix</span>
+cost = np.<span class="fn">empty</span>((n_det, n_active), dtype=np.float64)
+<span class="kw">for</span> i, (dcx, dcy) <span class="kw">in</span> <span class="fn">enumerate</span>(centers):
+    <span class="kw">for</span> j, (_, t) <span class="kw">in</span> <span class="fn">enumerate</span>(active):
+        cost[i, j] = np.<span class="fn">sqrt</span>((dcx - t[<span class="str">'cx'</span>])**<span class="num">2</span> +
+                             (dcy - t[<span class="str">'cy'</span>])**<span class="num">2</span>)
+
+<span class="cmt"># Pad to square matrix</span>
+dim = <span class="fn">max</span>(n_det, n_active)
+pad = np.<span class="fn">full</span>((dim, dim), max_distance * <span class="num">2</span>)
+pad[:n_det, :n_active] = cost
+
+<span class="cmt"># Optimal assignment</span>
+rows, cols = <span class="fn">linear_sum_assignment</span>(pad)</code></pre>
+  </div>
+
+  <h3>Distance Threshold</h3>
+  <p>
+    Not every assignment is acceptable — if the cost exceeds <code>max_distance</code>
+    (default: 300 px), we consider the detection unmatched to any existing track and a
+    <strong>new track</strong> is created. This prevents incorrectly linking distant faces.
+  </p>
+</section>
+
+<hr class="sep">
+
+<!-- ═══════════════════ 4. EMA ═══════════════════════ -->
+<section id="ema">
+  <h2><span class="num">4.</span> Exponential Moving Average (EMA)</h2>
+
+  <p>
+    To prevent the track position from reacting to single-frame detection anomalies (noise, minor
+    bounding-box shifts), the centroid of each track is <strong>smoothed</strong> using an Exponential
+    Moving Average:
+  </p>
+
+  <div class="math-block">
+    EMA<sub>t</sub> &nbsp;=&nbsp; &alpha; · x<sub>t</sub> &nbsp;+&nbsp; (1 − &alpha;) · EMA<sub>t−1</sub>
+    <span class="label">
+      &alpha; = ema_alpha (default 0.3) &nbsp;|&nbsp; x<sub>t</sub> = detection centroid at frame t
+    </span>
+  </div>
+
+  <div class="cols">
+    <div class="card">
+      <h4>High &alpha; (e.g. 0.7)</h4>
+      <ul>
+        <li>Faster response to person movement</li>
+        <li>Higher sensitivity to detection noise</li>
+        <li>Recommended for fast-moving subjects</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>Low &alpha; (e.g. 0.1)</h4>
+      <ul>
+        <li>More stable track position</li>
+        <li>Slower response to actual movement</li>
+        <li>Recommended when subjects are seated or stationary</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="card success">
+    <h4><span class="icon">✅</span> Default value: &alpha; = 0.3</h4>
+    <p>
+      A trade-off between stability and responsiveness. At 25 FPS with &alpha;=0.3, the track
+      response to a new position stabilizes after approximately 8–10 frames (~0.3–0.4 s). This
+      is sufficient to filter out single-frame noise while still keeping up with natural head movement.
+    </p>
+  </div>
+
+  <h3>Illustration: EMA vs. Raw Positions</h3>
+
+  <div class="diagram">
+  <span class="cmt">  Centroid X position (in pixels) across consecutive frames:</span>
+
+  Raw detection:    320  318  <span style="color:var(--red);">345</span>  321  319  320  <span style="color:var(--red);">298</span>  322  320
+                                   <span style="color:var(--red);">↑ noise</span>              <span style="color:var(--red);">↑ noise</span>
+
+  After EMA (α=0.3): 320  319  <span class="hlg">327</span>  325  323  322  <span class="hlg">315</span>  317  318
+                                   <span class="hlg">↑ smoothed</span>           <span class="hlg">↑ smoothed</span></div>
+</section>
+
+<hr class="sep">
+
+<!-- ═══════════════════ 5. LAYER 1 ════════════════════ -->
+<section id="layer1">
+  <h2><span class="num">5.</span> Layer 1 — <code>FaceTracker</code> in <code>process_video.py</code></h2>
+
+  <p>
+    The <code>FaceTracker</code> class is instantiated once before the processing loop and called on
+    every frame. Its task is to <strong>reorder the bounding-box list</strong> so that the position
+    in the list (= <code>face_idx</code>) consistently corresponds to the same person.
+  </p>
+
+  <h3>Data Flow</h3>
+
+  <div class="diagram">
+  <span class="hl">FaceBoxes(frame)</span>
+        │
+        ▼
+  boxes = [bbox_A, bbox_B]  <span class="cmt">← order may change!</span>
+        │
+        ▼
+  <span class="hl2">tracker.stabilize(boxes, frame_idx)</span>
+        │
+        ├─  Compute centroid of each bounding box
+        ├─  Filter out tracks older than <span class="var">drop_after_frames</span>
+        ├─  Build cost matrix (distance: centroid ↔ EMA track position)
+        ├─  Run <span class="hlg">Hungarian Algorithm</span> (linear_sum_assignment)
+        ├─  Reject assignments with cost > <span class="var">max_distance</span>
+        ├─  Create new tracks for unmatched detections
+        ├─  Update EMA positions for matched tracks
+        │
+        ▼
+  boxes = [bbox_A, bbox_B]  <span class="hlg">← always the same order!</span>
+        │
+        ▼
+  <span class="hl">TDDFA → dump to CSV</span></div>
+
+  <h3>Key Code Fragments</h3>
+
+  <div class="card">
+    <h4>Tracker Initialization</h4>
+<pre><code><span class="cmt"># Spatial face tracker: reorders detected boxes each frame so that</span>
+<span class="cmt"># face_idx stays consistent even when FaceBoxes changes detection order.</span>
+tracker = <span class="fn">FaceTracker</span>(ema_alpha=<span class="num">0.3</span>, max_distance=<span class="num">300</span>, drop_after_frames=<span class="num">30</span>)</code></pre>
+  </div>
+
+  <div class="card">
+    <h4>Usage in the Processing Loop</h4>
+<pre><code><span class="kw">for</span> i, frame <span class="kw">in</span> <span class="fn">tqdm</span>(<span class="fn">enumerate</span>(reader)):
+    frame_bgr = frame[..., ::-<span class="num">1</span>]
+    boxes = <span class="fn">face_boxes</span>(frame_bgr)
+
+    <span class="cmt"># Stabilize order — the critical step!</span>
+    boxes = tracker.<span class="fn">stabilize</span>(boxes, i)
+
+    face_count = <span class="fn">len</span>(boxes)
+    param_lst, roi_box_lst = <span class="fn">tddfa</span>(frame_bgr, boxes)
+    <span class="cmt">...</span></code></pre>
+  </div>
+
+  <div class="card">
+    <h4>Track Position Update (EMA)</h4>
+<pre><code><span class="cmt"># After matching a detection to a track:</span>
+cx, cy = centers[r]
+old = self._tracks[track_orig_idx]
+old[<span class="str">'cx'</span>] = self.ema_alpha * cx + (<span class="num">1</span> - self.ema_alpha) * old[<span class="str">'cx'</span>]
+old[<span class="str">'cy'</span>] = self.ema_alpha * cy + (<span class="num">1</span> - self.ema_alpha) * old[<span class="str">'cy'</span>]
+old[<span class="str">'last_frame'</span>] = frame_idx</code></pre>
+  </div>
+</section>
+
+<hr class="sep">
+
+<!-- ═══════════════════ 6. LAYER 2 ════════════════════ -->
+<section id="layer2">
+  <h2><span class="num">6.</span> Layer 2 — <code>reindex_face_ids.py</code></h2>
+
+  <p>
+    The post-processing stage operates on <strong>finished CSV files</strong> and serves as a second
+    line of defense. It supports two tracking strategies:
+  </p>
+
+  <div class="cols">
+    <div class="card highlight">
+      <h4>Strategy A: Face Embeddings</h4>
+      <p>
+        Uses precomputed <strong>128-dimensional embedding vectors</strong> (from a face recognition
+        model). It compares faces across frames using <strong>cosine similarity</strong> and assigns
+        stable IDs via the Hungarian algorithm on a cost matrix of <code>1 − similarity</code>.
+      </p>
+    </div>
+    <div class="card highlight">
+      <h4>Strategy B: Position Tracking (fallback)</h4>
+      <p>
+        Activated automatically when embeddings are <strong>placeholder</strong> (all zeros) or
+        manually via the <code>--use-position-tracking</code> flag. It computes the centroid from the
+        mean position of all 68 facial landmarks and applies the same EMA + Hungarian scheme.
+      </p>
+    </div>
+  </div>
+
+  <h3>Automatic Placeholder Detection</h3>
+
+  <div class="card">
+    <h4><span class="icon">🔍</span> Function <code>_are_embeddings_placeholder()</code></h4>
+<pre><code><span class="kw">def</span> <span class="fn">_are_embeddings_placeholder</span>(embeddings):
+    <span class="str">"""Detect whether embeddings are all-zero placeholder vectors."""</span>
+    <span class="kw">if</span> embeddings.size == <span class="num">0</span>:
+        <span class="kw">return</span> <span class="num">True</span>
+    norms = np.linalg.<span class="fn">norm</span>(embeddings, axis=<span class="num">1</span>)
+    <span class="cmt"># If >90% of vectors are near-zero → placeholder data</span>
+    <span class="kw">return</span> <span class="fn">float</span>(np.<span class="fn">mean</span>(norms &lt; <span class="num">1e-8</span>)) > <span class="num">0.9</span></code></pre>
+    <p style="margin-top:12px;">
+      When the face recognition model is not integrated, <code>extract_face_embeddings.py</code>
+      writes <code>np.zeros(128)</code> vectors. This function detects that case and automatically
+      switches to position-based tracking.
+    </p>
+  </div>
+
+  <h3>Position Tracking — Landmark Centroid</h3>
+
+  <p>
+    Unlike Layer 1 (which uses bounding-box centroids), Layer 2 computes the centroid as the
+    <strong>mean X, Y across all 68 facial landmark points</strong>. This provides greater precision
+    because landmarks localize the face more accurately than bounding boxes.
+  </p>
+
+  <div class="card">
+    <h4>Computing Centroids from Landmarks</h4>
+<pre><code>centroids = (
+    df_mouth
+    .<span class="fn">groupby</span>([<span class="str">'seconds'</span>, <span class="str">'face_idx'</span>])
+    .<span class="fn">agg</span>(cx=(<span class="str">'x'</span>, <span class="str">'mean'</span>), cy=(<span class="str">'y'</span>, <span class="str">'mean'</span>))
+    .<span class="fn">reset_index</span>()
+)</code></pre>
+  </div>
+
+  <h3>Decision Flow</h3>
+
+  <div class="diagram">
+  Load embeddings from <span class="hl">.npz</span>
+        │
+        ▼
+  Are embeddings placeholder?  ──<span class="hlg"> YES </span>──→  <span class="hl2">Position-based tracking</span>
+        │                                          (centroid of 68 landmarks + EMA)
+        │<span class="hl"> NO</span>
+        ▼
+  <span class="hl">Embedding-based tracking</span>
+  (cosine similarity + Hungarian)
+        │
+        ▼
+  Generate <span class="var">assignment_map</span>: (seconds, face_idx) → stable_track_id
+        │
+        ▼
+  Overwrite CSV files:
+    ├── <span class="hlg">mouth_position.csv</span>
+    ├── <span class="hlg">face_position.csv</span>
+    └── <span class="hlg">speaker_identification.csv</span></div>
+
+  <h3>CSV Reindexing</h3>
+
+  <div class="card">
+    <h4>Function <code>_reindex_df()</code></h4>
+<pre><code><span class="kw">def</span> <span class="fn">_reindex_df</span>(df, assignment_map):
+    <span class="str">"""Replace face_idx using assignment_map
+    keyed by (rounded seconds, face_idx)."""</span>
+    <span class="kw">def</span> <span class="fn">_new_idx</span>(row):
+        key = (<span class="fn">round</span>(<span class="fn">float</span>(row[<span class="str">'seconds'</span>]), <span class="num">6</span>), <span class="fn">int</span>(row[<span class="str">'face_idx'</span>]))
+        <span class="kw">return</span> assignment_map.<span class="fn">get</span>(key, row[<span class="str">'face_idx'</span>])
+
+    df = df.<span class="fn">copy</span>()
+    df[<span class="str">'face_idx'</span>] = df.<span class="fn">apply</span>(_new_idx, axis=<span class="num">1</span>).<span class="fn">astype</span>(<span class="fn">int</span>)
+    <span class="kw">return</span> df</code></pre>
+  </div>
+</section>
+
+<hr class="sep">
+
+<!-- ═══════════════════ 7. PIPELINE ═══════════════════ -->
+<section id="pipeline">
+  <h2><span class="num">7.</span> Pipeline Integration</h2>
+
+  <p>
+    The entire pipeline is orchestrated by <code>stitch_demo.sh</code>.
+    Face stabilization occurs at two points:
+  </p>
+
+  <div class="diagram">
+  <span class="hl">stitch_demo.sh</span>
+        │
+        ├── 1. <span class="fn">extract_wav_from_video.py</span>         <span class="cmt"># Extract audio</span>
+        │
+        ├── 2. <span class="fn">process_video.py</span>                  <span class="cmt"># Face detection + TDDFA</span>
+        │       └── <span class="hlg">FaceTracker.stabilize()</span>      <span class="cmt"># ← LAYER 1</span>
+        │       └── Output: mouth_position.csv,
+        │                   face_position.csv,
+        │                   face_count.csv
+        │
+        ├── 3. <span class="fn">run_identify_speakers.sh</span>           <span class="cmt"># Speaker identification (audio)</span>
+        │
+        ├── 4. <span class="fn">extract_face_embeddings.py</span>         <span class="cmt"># Face embeddings → .npz</span>
+        │
+        ├── 5. <span class="fn">reindex_face_ids.py</span>               <span class="cmt"># ← LAYER 2</span>
+        │       └── <span class="hlg">compute_assignment_map()</span>     <span class="cmt"># embedding or position</span>
+        │       └── Overwrite: mouth_position.csv,
+        │                      face_position.csv,
+        │                      speaker_identification.csv
+        │
+        └── 6. <span class="fn">multiface_distance_render.py</span>      <span class="cmt"># Dashboard rendering</span></div>
+</section>
+
+<hr class="sep">
+
+<!-- ═══════════════════ 8. PARAMETERS ════════════════════ -->
+<section id="params">
+  <h2><span class="num">8.</span> Configuration Parameters</h2>
+
+  <h3><code>process_video.py</code> — FaceTracker</h3>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Parameter</th>
+        <th>Default</th>
+        <th>Description</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>ema_alpha</code></td>
+        <td><code>0.3</code></td>
+        <td>EMA smoothing factor. Higher → faster response to movement; lower → greater stability.</td>
+      </tr>
+      <tr>
+        <td><code>max_distance</code></td>
+        <td><code>300</code> px</td>
+        <td>Distance threshold (pixels) for matching a detection to a track. Beyond this → new track.</td>
+      </tr>
+      <tr>
+        <td><code>drop_after_frames</code></td>
+        <td><code>30</code></td>
+        <td>Number of frames without a detection before a track is removed from memory.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3><code>reindex_face_ids.py</code> — CLI Arguments</h3>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Flag</th>
+        <th>Default</th>
+        <th>Description</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>--dumps_dir</code></td>
+        <td><code>dumps</code></td>
+        <td>Directory containing the CSV dump files.</td>
+      </tr>
+      <tr>
+        <td><code>--embeddings</code></td>
+        <td><code>face_embeddings.npz</code></td>
+        <td>Path to the face embeddings file.</td>
+      </tr>
+      <tr>
+        <td><code>--similarity-threshold</code></td>
+        <td><code>0.3</code></td>
+        <td>Minimum cosine similarity for matching (embedding mode).</td>
+      </tr>
+      <tr>
+        <td><code>--drop-after-frames</code></td>
+        <td><code>60</code></td>
+        <td>Number of frames after which a track is removed (both modes).</td>
+      </tr>
+      <tr>
+        <td><code>--use-position-tracking</code></td>
+        <td><code>false</code></td>
+        <td>Force position-based tracking instead of embedding-based.</td>
+      </tr>
+      <tr>
+        <td><code>--max-distance</code></td>
+        <td><code>300</code> px</td>
+        <td>Distance threshold for position-based mode.</td>
+      </tr>
+      <tr>
+        <td><code>--ema-alpha</code></td>
+        <td><code>0.3</code></td>
+        <td>EMA smoothing factor for position-based mode.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="card warn">
+    <h4><span class="icon">💡</span> Tuning Tips</h4>
+    <ul>
+      <li><strong>Speakers sitting close together</strong> — reduce <code>max_distance</code> to ~150–200 px
+          to avoid confusing nearby faces.</li>
+      <li><strong>Speakers walking around</strong> — increase <code>max_distance</code> to ~400–500 px
+          and raise <code>ema_alpha</code> to ~0.5 so the tracker can keep up with movement.</li>
+      <li><strong>Frequent detection gaps</strong> — increase <code>drop_after_frames</code> so that
+          tracks are not lost during momentary face occlusions.</li>
+    </ul>
+  </div>
+</section>
+
+<hr class="sep">
+
+<!-- ═══════════════════ GLOSSARY ═══════════════════ -->
+<section id="glossary">
+  <h2><span class="num">9.</span> Glossary</h2>
+
+  <table>
+    <thead>
+      <tr><th>Term</th><th>Definition</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Bounding Box</strong></td>
+        <td>A rectangle (x1, y1, x2, y2) enclosing a detected face.</td>
+      </tr>
+      <tr>
+        <td><strong>Centroid</strong></td>
+        <td>The center point of a bounding box, or the averaged position of facial landmarks.</td>
+      </tr>
+      <tr>
+        <td><strong>Cosine Similarity</strong></td>
+        <td>A measure of vector similarity: cos(&theta;) = (A·B) / (||A|| · ||B||). Range [−1, 1].</td>
+      </tr>
+      <tr>
+        <td><strong>EMA</strong></td>
+        <td>Exponential Moving Average — a smoothing filter that gives more weight to recent values.</td>
+      </tr>
+      <tr>
+        <td><strong>Embedding</strong></td>
+        <td>A 128-dimensional vector describing the identity of a face (from a face recognition model).</td>
+      </tr>
+      <tr>
+        <td><strong>face_idx</strong></td>
+        <td>A 0-based face index in a given frame. Goal: make it stable per person across frames.</td>
+      </tr>
+      <tr>
+        <td><strong>Hungarian Algorithm</strong></td>
+        <td>An O(n³) algorithm that solves the optimal assignment problem (Kuhn-Munkres).</td>
+      </tr>
+      <tr>
+        <td><strong>Landmark</strong></td>
+        <td>A facial characteristic point — 68 points describing the jaw, eyebrows, nose, eyes, and mouth.</td>
+      </tr>
+      <tr>
+        <td><strong>linear_sum_assignment</strong></td>
+        <td>The scipy implementation of the Hungarian algorithm in <code>scipy.optimize</code>.</td>
+      </tr>
+      <tr>
+        <td><strong>Track</strong></td>
+        <td>A tracking object that stores the historical (EMA-smoothed) position of a single face.</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<footer>
+  Face Tracking Stabilization Documentation &bull; 3DDFA_V2 Pipeline &bull; 2026
+</footer>
+
+</div><!-- /.container -->
+
+<a href="#" class="top-btn" title="Back to top">&uarr;</a>
+
+</body>
+</html>

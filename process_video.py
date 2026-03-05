@@ -11,6 +11,7 @@ from collections import deque
 from utils.tddfa_util import str2bool
 from utils.pose import calc_pose
 import os
+from scipy.optimize import linear_sum_assignment
 
 from FaceBoxes import FaceBoxes
 from TDDFA import TDDFA
@@ -21,6 +22,124 @@ from utils.functions import cv_draw_landmark
 face_count_dump_file_path = 'dumps/face_count.csv'
 face_orientation_dump_file_path = 'dumps/face_position.csv'
 mouth_position_dump_file_path = 'dumps/mouth_position.csv'
+
+
+class FaceTracker:
+    """
+    Spatial face tracker that maintains consistent face_idx across frames.
+
+    Problem: FaceBoxes returns detected faces in an order that may change
+    frame-to-frame (e.g. sorted by confidence or area).  When two speakers
+    are at a similar distance from the camera, their detection order can
+    flip, causing face_idx 0 and 1 to swap randomly.
+
+    Solution: Track the spatial position (centroid) of each face across
+    frames using an exponential moving average (EMA).  On each new frame,
+    use the Hungarian algorithm to find the optimal assignment between
+    detected face centroids and tracked positions, then reorder the
+    detection list so that face_idx remains consistent.
+
+    Parameters:
+        ema_alpha: Smoothing factor for centroid EMA (0–1).
+                   Higher → quicker response to movement; lower → more stable.
+        max_distance: Maximum pixel distance to allow matching a detection
+                      to an existing track.  Detections farther than this
+                      create a new track.
+        drop_after_frames: Number of consecutive unseen frames before a
+                           track is considered lost and freed.
+    """
+
+    def __init__(self, ema_alpha=0.3, max_distance=300, drop_after_frames=30):
+        self.ema_alpha = ema_alpha
+        self.max_distance = max_distance
+        self.drop_after_frames = drop_after_frames
+        # Each entry: {'cx': float, 'cy': float, 'last_frame': int}
+        # Index in this list == stable face_idx
+        self._tracks = []
+
+    @staticmethod
+    def _box_center(box):
+        """Compute centroid from a bounding box [x1, y1, x2, y2, ...]."""
+        return ((float(box[0]) + float(box[2])) / 2.0,
+                (float(box[1]) + float(box[3])) / 2.0)
+
+    def stabilize(self, boxes, frame_idx):
+        """
+        Reorder *boxes* so that the i-th element corresponds to the
+        spatially consistent face_idx = i.
+
+        Args:
+            boxes: list/array of detected face bounding boxes
+                   (each element: [x1, y1, x2, y2, ...])
+            frame_idx: current frame number (for track age management)
+
+        Returns:
+            list of boxes in stabilized order (same length as input).
+        """
+        n_det = len(boxes)
+        if n_det == 0:
+            return []
+
+        centers = [self._box_center(b) for b in boxes]
+
+        # ---- First frame or all tracks lost → initialise ----------------
+        active = [(i, t) for i, t in enumerate(self._tracks)
+                  if frame_idx - t['last_frame'] <= self.drop_after_frames]
+
+        if not active:
+            self._tracks = [
+                {'cx': cx, 'cy': cy, 'last_frame': frame_idx}
+                for cx, cy in centers
+            ]
+            return list(boxes)
+
+        n_active = len(active)
+
+        # ---- Build cost matrix (Euclidean distance) ---------------------
+        cost = np.empty((n_det, n_active), dtype=np.float64)
+        for i, (dcx, dcy) in enumerate(centers):
+            for j, (_, t) in enumerate(active):
+                cost[i, j] = np.sqrt((dcx - t['cx'])**2 +
+                                     (dcy - t['cy'])**2)
+
+        # Pad to square so linear_sum_assignment works for any shape
+        dim = max(n_det, n_active)
+        pad = np.full((dim, dim), self.max_distance * 2, dtype=np.float64)
+        pad[:n_det, :n_active] = cost
+        rows, cols = linear_sum_assignment(pad)
+
+        # ---- Interpret assignment ---------------------------------------
+        # track_orig_idx → detection_idx
+        assignments = {}
+        matched_dets = set()
+
+        for r, c in zip(rows, cols):
+            if r < n_det and c < n_active and cost[r, c] <= self.max_distance:
+                track_orig_idx = active[c][0]  # original index in self._tracks
+                assignments[track_orig_idx] = r
+                matched_dets.add(r)
+                # Update centroid with EMA
+                cx, cy = centers[r]
+                old = self._tracks[track_orig_idx]
+                old['cx'] = self.ema_alpha * cx + (1 - self.ema_alpha) * old['cx']
+                old['cy'] = self.ema_alpha * cy + (1 - self.ema_alpha) * old['cy']
+                old['last_frame'] = frame_idx
+
+        # ---- New tracks for unmatched detections ------------------------
+        for det_i in range(n_det):
+            if det_i not in matched_dets:
+                cx, cy = centers[det_i]
+                new_idx = len(self._tracks)
+                self._tracks.append(
+                    {'cx': cx, 'cy': cy, 'last_frame': frame_idx})
+                assignments[new_idx] = det_i
+
+        # ---- Build reordered output (sorted by track index = face_idx) --
+        reordered = []
+        for track_idx in sorted(assignments.keys()):
+            reordered.append(boxes[assignments[track_idx]])
+
+        return reordered
 
 def dump_mouth_coordinates(ver, i, face_idx, mouth_position_dump_file):
     """
@@ -95,6 +214,11 @@ def main(args):
     # run
     dense_flag = args.opt in ('2d_dense', '3d')
     pre_ver = None
+
+    # Spatial face tracker: reorders detected boxes each frame so that
+    # face_idx stays consistent even when FaceBoxes changes detection order.
+    tracker = FaceTracker(ema_alpha=0.3, max_distance=300, drop_after_frames=30)
+
     with open(face_count_dump_file_path, mode='w') as face_count_dump_file, \
          open(face_orientation_dump_file_path, mode='w') as face_orientation_dump_file, \
          open(mouth_position_dump_file_path, mode='w') as mouth_position_dump_file:
@@ -112,6 +236,8 @@ def main(args):
                 # the first frame, detect face, here we only use the first face, you can change depending on your need
                 boxes = face_boxes(frame_bgr)
                 #boxes = [boxes[0]]
+                # Stabilize face order using spatial tracker
+                boxes = tracker.stabilize(boxes, i)
                 # Detect faces, get 3DMM params and roi boxes
                 # If dumps are enabled, save the number of faces into a .txt file
                 face_count = len(boxes) # count how many faces were detected
@@ -142,6 +268,8 @@ def main(args):
             #    if abs(roi_box[2] - roi_box[0]) * abs(roi_box[3] - roi_box[1]) < 2020:
                 boxes = face_boxes(frame_bgr)
             #        boxes = [boxes[0]]
+                # Stabilize face order using spatial tracker
+                boxes = tracker.stabilize(boxes, i)
                 face_count = len(boxes)
 
                 param_lst, roi_box_lst = tddfa(frame_bgr, boxes)
