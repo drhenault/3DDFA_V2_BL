@@ -5,30 +5,37 @@
 
 A fork of 3DDFA_V2, modified for internal purposes.
 
-## Installation (Linux):
-1. Clone the repository with `git clone`:
+## Installation (Linux)
 
-  `$ git clone --recursive git@github.com:babblelabs/3ddfa_v2`
+1. **Clone the repository (with submodules):**
+   ```bash
+   git clone --recursive git@github.com:babblelabs/3ddfa_v2
+   cd 3ddfa_v2
+   ```
 
-  `$ cd 3ddfa_v2`
+2. **Import FaceNet checkpoint(s).**  
+   Get pre-trained model checkpoints from the [FaceNet GitHub repository](https://github.com/davidsandberg/facenet) (see its README for download links). Create a subdirectory for each checkpoint under `facenet/models/` and place the checkpoint files there (e.g. `facenet/models/20180402-114759/`).
 
-2. Create a virtual environment and activate it:
+3. **TX Audio Pipeline**  
+   Obtain a copy of the TX audio pipeline repository. Run its demo TX pipeline script with input paths pointing at this repo’s `./input` directory. 
 
-  `$ python3 -m venv 3ddfa-venv`
+4. **Run the setup script** to create and populate the virtual environments:
+   ```bash
+   ./setup_script.sh
+   ```
+   This sets up the FaceNet and 3DDFA_v2 virtual environments and runs the Cython build.
 
-  `$ source 3ddfa-venv/bin/activate`
+## Processing one video and rendering
 
-3. Install packages from the `requirements.txt` file into the environment:
+1. Put your video file in `./inputs` and enrollment avatars for face matching in `./enrollment-avatars`.
+2. In `stitch_demo.sh`, set the correct path to the TX audio pipeline repository (the `AUDIO_PIPELINE_DIRECTORY_PATH` variable).
+3. Run `./stitch_demo.sh` and wait for the pipeline to finish. Output will appear in `./outputs`.
 
-`(venv) $ pip install -r requirements.txt`
+---
 
-4. Run the Cython build command:
+## Legacy script usage
 
-  `$ sh ./build.sh`
-
-## Usage:
-
-### Video analysis:
+### Video analysis
 Performs an analysis of a video file. Collects information about headcount, head position, orientation, and proximity.
 
 Syntax:
