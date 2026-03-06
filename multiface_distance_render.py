@@ -18,6 +18,10 @@ from tqdm import tqdm
 from collections import deque, OrderedDict
 import subprocess
 import os
+try:
+    import soundfile as sf
+except ImportError:
+    sf = None
 import torch
 import torch.nn as nn
 
@@ -45,6 +49,66 @@ def calculate_distance(z_value):
     if z_value <= 0:
         return 0
     return 100.0 / z_value
+
+
+def smooth_binary_signal(signal, pad_frames):
+    """
+    Morphological dilation of a binary (0/1) signal.
+
+    Extends each contiguous active block by *pad_frames* on both sides.
+    Implementation uses a 1-D convolution with a rectangular kernel.
+
+    Args:
+        signal:     1-D array-like of 0/1 values.
+        pad_frames: Number of frames to add on each side of every active block.
+
+    Returns:
+        numpy int array of same length as *signal* (values 0 or 1).
+    """
+    if pad_frames <= 0:
+        return np.array(signal, dtype=int)
+    arr = np.array(signal, dtype=float)
+    kernel = np.ones(2 * pad_frames + 1)
+    smoothed = np.convolve(arr, kernel, mode='same')
+    return (smoothed > 0).astype(int)
+
+
+def precompute_smoothed_audio_vad(df_vad, timestamps, fps, pad_ms=250.0):
+    """
+    Align Audio VAD decisions to video-frame timestamps and apply smoothing.
+
+    Smoothing = morphological dilation: each contiguous block of 1s is extended
+    by *pad_ms* milliseconds on both sides.
+
+    Args:
+        df_vad:     DataFrame with columns 'seconds' and 'vadDagcDecFinal'.
+        timestamps: 1-D array of video-frame timestamps (seconds).
+        fps:        Video frame rate (used to convert ms → frames).
+        pad_ms:     Padding in milliseconds added to each side of active blocks.
+
+    Returns:
+        numpy int array of 0/1 per video frame (smoothed Audio VAD).
+    """
+    n = len(timestamps)
+    if df_vad is None or df_vad.empty or n == 0:
+        return np.zeros(n, dtype=int)
+
+    vad_times = df_vad['seconds'].values
+    vad_vals = df_vad['vadDagcDecFinal'].values.astype(int)
+
+    # Nearest-neighbour alignment of Audio VAD to video-frame grid
+    aligned = np.zeros(n, dtype=int)
+    for i, t in enumerate(timestamps):
+        idx = np.argmin(np.abs(vad_times - t))
+        aligned[i] = int(vad_vals[idx])
+
+    # Smooth: extend each active block by pad_ms on each side
+    if pad_ms > 0 and n > 1:
+        dt = 1.0 / fps
+        pad_frames = int(np.ceil(pad_ms / 1000.0 / dt))
+        aligned = smooth_binary_signal(aligned, pad_frames)
+
+    return aligned
 
 
 # ---------------------------------------------------------------------------
@@ -788,7 +852,8 @@ class DNN_VVAD_Detector:
 
 
 def draw_facial_landmarks(frame, landmarks_df, timestamp, face_idx=0,
-                          frontalize=True, vvad_detector=None):
+                          frontalize=True, vvad_detector=None,
+                          speaking_override=None):
     """
     Draw facial landmarks on the frame with Visual VAD coloring.
     
@@ -805,6 +870,10 @@ def draw_facial_landmarks(frame, landmarks_df, timestamp, face_idx=0,
         frontalize: If True, apply frontalization to mouth landmarks
         vvad_detector: VisualVADDetector instance for speech activity detection.
                        If None, frontalized points default to green.
+                       Ignored when *speaking_override* is not None.
+        speaking_override: If not None, use this boolean instead of calling the
+                           VVAD detector (to avoid double state updates when the
+                           detector was already called externally).
     
     Returns:
         Modified frame
@@ -849,7 +918,10 @@ def draw_facial_landmarks(frame, landmarks_df, timestamp, face_idx=0,
     is_speaking = False
     speech_prob = 0.0
     speech_prob_smoothed = 0.0
-    if vvad_detector is not None:
+    if speaking_override is not None:
+        # Decision was already computed externally (avoids double state update)
+        is_speaking = bool(speaking_override)
+    elif vvad_detector is not None:
         if isinstance(vvad_detector, DNN_VVAD_Detector):
             # DNN-based V-VAD: pass all 68 landmark 3D coordinates
             if len(points_3d) >= 68:
@@ -1484,6 +1556,134 @@ def draw_speaker_avatar(frame, avatar_img, face_landmarks_df,
     return frame
 
 
+class EnrollmentCollector:
+    """
+    Accumulates enrollment audio for each target talker independently.
+
+    For every target talker (face within *target_distance* of the camera),
+    audio frames are appended when both the smoothed Audio VAD and the
+    Video VAD indicate speech — unless multiple target talkers are
+    simultaneously active (overlap), in which case no audio is collected
+    for any of them.
+
+    Once *target_duration_s* seconds of speech have been collected for a
+    given face, that face is marked as completed.
+    """
+
+    def __init__(self, target_duration_s=10.0, sample_rate=48000):
+        self.target_duration = target_duration_s
+        self.sample_rate = sample_rate
+        self.target_samples = int(target_duration_s * sample_rate)
+        self._collected = {}        # face_idx -> list[np.ndarray]
+        self._total_samples = {}    # face_idx -> int
+        self._completed = {}        # face_idx -> bool
+        self.ever_seen = set()      # all face_idx ever registered
+
+    def register_target(self, face_idx):
+        """Register *face_idx* as a target talker (idempotent)."""
+        self.ever_seen.add(face_idx)
+        if face_idx not in self._collected:
+            self._collected[face_idx] = []
+            self._total_samples[face_idx] = 0
+            self._completed[face_idx] = False
+
+    def add_audio(self, face_idx, samples):
+        """Append audio *samples* for *face_idx*. Truncates at target duration."""
+        if face_idx not in self._collected:
+            self.register_target(face_idx)
+        if self._completed[face_idx]:
+            return
+
+        remaining = self.target_samples - self._total_samples[face_idx]
+        if remaining <= 0:
+            self._completed[face_idx] = True
+            return
+
+        chunk = samples[:remaining]
+        self._collected[face_idx].append(chunk.copy())
+        self._total_samples[face_idx] += len(chunk)
+
+        if self._total_samples[face_idx] >= self.target_samples:
+            self._completed[face_idx] = True
+
+    def is_completed(self, face_idx):
+        """Return True if enrollment target has been reached."""
+        return self._completed.get(face_idx, False)
+
+    def get_progress(self, face_idx):
+        """Return enrollment progress as a fraction in [0, 1]."""
+        if face_idx not in self._total_samples:
+            return 0.0
+        return min(1.0, self._total_samples[face_idx] / self.target_samples)
+
+    def get_duration(self, face_idx):
+        """Return collected duration in seconds."""
+        return self._total_samples.get(face_idx, 0) / self.sample_rate
+
+    def get_audio(self, face_idx):
+        """Return concatenated audio array, or None if nothing was collected."""
+        if face_idx not in self._collected or not self._collected[face_idx]:
+            return None
+        return np.concatenate(self._collected[face_idx])
+
+
+def draw_enrollment_progress_bars(frame, enrollment_collector, target_duration,
+                                  x_start=20, y_start=20):
+    """
+    Draw an enrollment progress bar for every registered target talker.
+
+    Each bar shows the amount of collected enrollment audio relative to
+    *target_duration*.  Bars are drawn in the top-left area of the frame.
+    """
+    if not frame.flags['C_CONTIGUOUS']:
+        frame = np.ascontiguousarray(frame)
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    bar_width = 200
+    bar_height = 18
+    label_height = 18
+    spacing = bar_height + label_height + 8
+
+    sorted_targets = sorted(enrollment_collector.ever_seen)
+
+    for i, face_idx in enumerate(sorted_targets):
+        y = y_start + i * spacing
+        progress = enrollment_collector.get_progress(face_idx)
+        completed = enrollment_collector.is_completed(face_idx)
+        duration = enrollment_collector.get_duration(face_idx)
+
+        # Label above bar
+        label = f"TT{face_idx}: {duration:.1f}s / {target_duration:.0f}s"
+        if completed:
+            label += " Done"
+        color_idx = face_idx % len(FACE_COLORS_BGR)
+        label_color = FACE_COLORS_BGR[color_idx]
+        cv2.putText(frame, label, (x_start, y + label_height - 4),
+                    font, 0.5, label_color, 1, cv2.LINE_AA)
+
+        bar_y = y + label_height
+
+        # Dark background
+        cv2.rectangle(frame, (x_start, bar_y),
+                      (x_start + bar_width, bar_y + bar_height),
+                      (50, 50, 50), -1)
+
+        # Progress fill
+        fill_width = int(progress * bar_width)
+        if fill_width > 0:
+            fill_color = (0, 200, 0) if completed else FACE_COLORS_BGR[color_idx]
+            cv2.rectangle(frame, (x_start, bar_y),
+                          (x_start + fill_width, bar_y + bar_height),
+                          fill_color, -1)
+
+        # Border
+        cv2.rectangle(frame, (x_start, bar_y),
+                      (x_start + bar_width, bar_y + bar_height),
+                      (200, 200, 200), 1)
+
+    return frame
+
+
 def copy_audio_with_ffmpeg(input_video, temp_video, final_output):
     """
     Copy audio from input video to rendered video using ffmpeg
@@ -1549,7 +1749,9 @@ def copy_audio_with_ffmpeg(input_video, temp_video, final_output):
 
 
 def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_vad, output_path,
-                                show_markers=True, speaker_lookup=None, avatars=None, vvad_model_path=None):
+                                show_markers=True, speaker_lookup=None, avatars=None, vvad_model_path=None,
+                                audio_vad_pad_ms=250.0, vvad_pad_ms=0.0,
+                                enrollment_duration=10.0, target_distance=2.0):
     """
     Render annotated video with dashboard overlay and speaker avatars.
     
@@ -1564,6 +1766,16 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
         speaker_lookup: dict (seconds, face_idx) -> speaker_name (from speaker_identification.csv)
         avatars: dict speaker_name -> BGR image (loaded from enrollment-avatars/)
         vvad_model_path: Path to trained V-VAD DNN model (.pt). If None or missing, use MAR heuristic.
+        audio_vad_pad_ms: Audio VAD smoothing — milliseconds of padding added on
+                          each side of every active block (default 250 ms).
+        vvad_pad_ms: Video VAD smoothing — milliseconds of padding added on each
+                     side of every active block (default 0 ms = inactive).
+                     NOTE: non-zero values would require a two-pass approach;
+                     currently the DNN hold-time provides the only temporal
+                     smoothing for Video VAD.
+        enrollment_duration: Target enrollment audio length in seconds (default 10).
+        target_distance: Maximum distance (meters) for a face to be considered
+                         a target talker (default 2.0).
     """
     print(f"\nReading video: {video_path}")
     reader = imageio.get_reader(video_path)
@@ -1602,6 +1814,41 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
                                           var_threshold=0.002, mar_activity_threshold=0.15,
                                           hold_seconds=1.0, min_zcr=3)
     
+    # ── Enrollment: load source audio and precompute smoothed Audio VAD ──
+    audio_samples = None
+    audio_sr = None
+    enrollment_collector = None
+    smoothed_audio_vad = None
+
+    wav_path = Path(video_path).with_suffix('.wav')
+    if sf is not None and wav_path.exists():
+        audio_samples, audio_sr = sf.read(str(wav_path), dtype='float32')
+        if audio_samples.ndim > 1:
+            audio_samples = audio_samples[:, 0]  # mono
+        print(f"  Source audio loaded: {wav_path.name} "
+              f"({len(audio_samples)/audio_sr:.1f}s, {audio_sr} Hz)")
+
+        # Video-frame timestamps used for alignment
+        video_timestamps = np.array([i / fps for i in range(len(df_face_count))])
+
+        # Smoothed Audio VAD (morphological dilation by audio_vad_pad_ms)
+        smoothed_audio_vad = precompute_smoothed_audio_vad(
+            df_vad, video_timestamps, fps, pad_ms=audio_vad_pad_ms
+        )
+        print(f"  Audio VAD smoothed (pad={audio_vad_pad_ms:.0f} ms): "
+              f"{int(smoothed_audio_vad.sum())} / {len(smoothed_audio_vad)} frames active")
+
+        enrollment_collector = EnrollmentCollector(
+            target_duration_s=enrollment_duration,
+            sample_rate=audio_sr,
+        )
+        print(f"  Enrollment collector ready: target {enrollment_duration:.0f}s per talker, "
+              f"max distance {target_distance:.1f}m")
+    elif sf is None:
+        print(f"  ⚠ 'soundfile' module not installed; enrollment audio disabled")
+    else:
+        print(f"  ⚠ Source WAV not found ({wav_path.name}); enrollment audio disabled")
+
     # Store last valid audio data to persist after MQE data ends
     last_audio_data = None
     
@@ -1734,15 +1981,82 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
         # Draw dashboard overlay
         frame_bgr = draw_dashboard(frame_bgr, frame_idx, face_count, face_distances, timestamp, audio_data, vad_data)
         
+        # ── Compute V-VAD decisions for ALL faces this frame ──────────────
+        # Done once here so (a) the detector state advances exactly once per
+        # face per frame, (b) the decision can be reused for landmark
+        # colouring AND enrollment logic.
+        vvad_decisions_frame = {}
+        if face_count > 0 and vvad_detector is not None:
+            ts_rounded = round(timestamp, 6)
+            for face_idx in sorted(face_distances.keys()):
+                face_lm = df_mouth[
+                    (df_mouth['seconds'].round(6) == ts_rounded) &
+                    (df_mouth['face_idx'] == face_idx)
+                ]
+                if face_lm.empty:
+                    continue
+                pts3d = {}
+                for _, row in face_lm.iterrows():
+                    pts3d[int(row['point_type'])] = (
+                        float(row['x']), float(row['y']), float(row['z']))
+
+                if isinstance(vvad_detector, DNN_VVAD_Detector):
+                    if len(pts3d) >= 68:
+                        is_act, _, _ = vvad_detector.update(face_idx, pts3d)
+                        vvad_decisions_frame[face_idx] = is_act
+                else:
+                    fp = frontalize_mouth_landmarks(pts3d)
+                    if fp:
+                        mar = compute_mouth_aspect_ratio(fp)
+                        is_act, _, _ = vvad_detector.update(face_idx, mar)
+                        vvad_decisions_frame[face_idx] = is_act
+
         # Draw facial landmarks for all detected faces (with V-VAD coloring)
-        # face_distances keys are track IDs present this frame
+        # Uses speaking_override to avoid double state updates on the detector.
         if show_markers and face_count > 0:
             for face_idx in sorted(face_distances.keys()):
                 frame_bgr = draw_facial_landmarks(
                     frame_bgr, df_mouth, timestamp, face_idx,
-                    frontalize=True, vvad_detector=vvad_detector
+                    frontalize=True, vvad_detector=None,
+                    speaking_override=vvad_decisions_frame.get(face_idx, False)
                 )
-        
+
+        # ── Enrollment audio collection ────────────────────────────────────
+        if enrollment_collector is not None and audio_samples is not None:
+            # Audio VAD decision for this video frame (smoothed)
+            avad_active = bool(
+                smoothed_audio_vad[frame_idx]
+            ) if frame_idx < len(smoothed_audio_vad) else False
+
+            # Identify target talkers (distance ≤ target_distance)
+            # and compute intersection: Audio VAD AND Video VAD
+            target_active = {}   # {face_idx: bool}
+            for fid, dist in face_distances.items():
+                if dist <= target_distance:
+                    enrollment_collector.register_target(fid)
+                    vvad_active = vvad_decisions_frame.get(fid, False)
+                    target_active[fid] = avad_active and vvad_active
+
+            # Overlap check: collect ONLY when exactly 1 target talker is
+            # active.  If >1 are active simultaneously → skip everyone.
+            active_targets = [fid for fid, active in target_active.items()
+                              if active]
+
+            if len(active_targets) == 1:
+                fid = active_targets[0]
+                if not enrollment_collector.is_completed(fid):
+                    s_start = int(frame_idx / fps * audio_sr)
+                    s_end = int((frame_idx + 1) / fps * audio_sr)
+                    s_end = min(s_end, len(audio_samples))
+                    if s_end > s_start:
+                        enrollment_collector.add_audio(
+                            fid, audio_samples[s_start:s_end])
+
+        # Draw enrollment progress bars (top-left corner)
+        if enrollment_collector is not None and enrollment_collector.ever_seen:
+            frame_bgr = draw_enrollment_progress_bars(
+                frame_bgr, enrollment_collector, enrollment_duration)
+
         # Draw speaker avatars above identified faces
         if speaker_lookup and avatars and face_count > 0:
             ts_key = round(timestamp, 6)
@@ -1772,7 +2086,23 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
     reader.close()
     
     print(f"\n✓ Video rendering complete")
-    
+
+    # ── Save enrollment WAVs ──────────────────────────────────────────
+    if enrollment_collector is not None and enrollment_collector.ever_seen:
+        video_stem = Path(video_path).stem
+        out_dir = output_path.parent
+        print(f"\nEnrollment audio results:")
+        for fid in sorted(enrollment_collector.ever_seen):
+            audio_data = enrollment_collector.get_audio(fid)
+            dur = enrollment_collector.get_duration(fid)
+            if audio_data is not None and len(audio_data) > 0:
+                wav_name = f"{video_stem}_enrollment_tt{fid}.wav"
+                wav_out = out_dir / wav_name
+                sf.write(str(wav_out), audio_data, audio_sr, subtype='FLOAT')
+                print(f"  ✓ Target Talker {fid}: {dur:.2f}s → {wav_out}")
+            else:
+                print(f"  ✗ Target Talker {fid}: no speech collected (0.0s)")
+
     # Copy audio from original video
     copy_audio_with_ffmpeg(video_path, temp_output, output_path)
     
@@ -1873,7 +2203,11 @@ def main(args):
         show_markers=args.show_markers,
         speaker_lookup=speaker_lookup,
         avatars=avatars,
-        vvad_model_path=getattr(args, 'vvad_model', None)
+        vvad_model_path=getattr(args, 'vvad_model', None),
+        audio_vad_pad_ms=getattr(args, 'audio_vad_pad_ms', 250.0),
+        vvad_pad_ms=getattr(args, 'vvad_pad_ms', 0.0),
+        enrollment_duration=getattr(args, 'enrollment_duration', 10.0),
+        target_distance=getattr(args, 'target_distance', 2.0),
     )
     
     print("\n" + "="*60)
@@ -1931,6 +2265,22 @@ Output:
                        help='Path to trained V-VAD DNN model checkpoint '
                             '(default: vvad_dnn_model.pt). '
                             'Falls back to MAR heuristic if file not found.')
+    parser.add_argument('--audio-vad-pad-ms', dest='audio_vad_pad_ms',
+                       type=float, default=250.0,
+                       help='Audio VAD smoothing: ms of padding added on each '
+                            'side of every active block (default: 250)')
+    parser.add_argument('--vvad-pad-ms', dest='vvad_pad_ms',
+                       type=float, default=0.0,
+                       help='Video VAD smoothing: ms of padding added on each '
+                            'side of every active block (default: 0 = off)')
+    parser.add_argument('--enrollment-duration', dest='enrollment_duration',
+                       type=float, default=10.0,
+                       help='Target enrollment audio duration in seconds '
+                            '(default: 10)')
+    parser.add_argument('--target-distance', dest='target_distance',
+                       type=float, default=2.0,
+                       help='Maximum distance in meters for a face to be '
+                            'considered a target talker (default: 2.0)')
     parser.set_defaults(show_markers=True)
 
     args = parser.parse_args()
