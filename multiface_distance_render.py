@@ -41,6 +41,12 @@ FACE_COLORS_BGR = [
     (207, 190, 23),   # Cyan
 ]
 
+
+def brighten_color(bgr, factor=1.4, offset=40):
+    """Return a brightened version of a BGR colour tuple for dark backgrounds."""
+    return tuple(min(255, int(c * factor + offset)) for c in bgr)
+
+
 def calculate_distance(z_value):
     """
     Convert z-coordinate to approximate distance in meters
@@ -942,6 +948,7 @@ def draw_facial_landmarks(frame, landmarks_df, timestamp, face_idx=0,
     #         cv2.circle(frame, pt_coord, point_radius, original_color, point_thickness, cv2.LINE_AA)
     
     # 2) Frontalized mouth landmarks — Green if speaking, Red if inactive
+    #    Only outer mouth (48-59); inner mouth (60-67) disabled.
     if frontalized_points:
         if is_speaking:
             frontal_color = (0, 255, 0)    # Green (BGR) — ACTIVE
@@ -949,6 +956,10 @@ def draw_facial_landmarks(frame, landmarks_df, timestamp, face_idx=0,
             frontal_color = (0, 0, 255)    # Red (BGR)   — INACTIVE
         
         for pt_idx, pt_coord in frontalized_points.items():
+            # if pt_idx >= 60:          # inner mouth landmarks
+            #     continue
+            if pt_idx in range(60, 68):  # skip inner mouth landmarks
+                continue
             cv2.circle(frame, pt_coord, point_radius, frontal_color, point_thickness, cv2.LINE_AA)
     
     return frame
@@ -1075,7 +1086,10 @@ def draw_pie_chart(frame, center_x, center_y, radius, data_dict, title, show_leg
     return frame
 
 
-def draw_dashboard(frame, frame_idx, face_count, face_distances, timestamp, audio_data=None, vad_data=None):
+def draw_dashboard(frame, frame_idx, face_count, face_distances, timestamp,
+                   audio_data=None, vad_data=None,
+                   enrollment_collector=None, enrollment_duration=10.0,
+                   face_avatars=None, active_targets=None):
     """
     Draw dashboard overlay on frame
     
@@ -1087,6 +1101,10 @@ def draw_dashboard(frame, frame_idx, face_count, face_distances, timestamp, audi
         timestamp: Time in seconds
         audio_data: Dict with before/after BNR audio classification data
         vad_data: Dict with VAD history and current value
+        enrollment_collector: EnrollmentCollector instance (or None)
+        enrollment_duration: Target enrollment duration in seconds
+        face_avatars: dict face_idx -> BGR avatar image (or None)
+        active_targets: list of face_idx that are active this frame (or None)
     """
     # Ensure frame is contiguous for OpenCV operations
     if not frame.flags['C_CONTIGUOUS']:
@@ -1100,17 +1118,19 @@ def draw_dashboard(frame, frame_idx, face_count, face_distances, timestamp, audi
     panel_x = width - panel_width - panel_margin
     panel_y = panel_margin
     
-    # Fixed panel height for 2 faces + audio section + VAD graph (always constant)
+    # Fixed panel height (always constant for consistent appearance)
     # Calculate based on actual content:
     # Title: 30 + 35 = 65
     # Info lines (Frame, Time, Faces): 3 * 38 = 114
     # Padding + separator: 10 + 28 = 38
     # Face slots (2 faces): 2 * 38 = 76
+    # Enrollment section: 10 + separator + 20 + title(25) + 2*slot(62) = 179
     # Audio section: 30 (separator) + 250 (pie charts) = 280
     # VAD section: 30 (separator) + 70 (graph) = 100
     # Bottom padding: 20
     line_height = 38
-    panel_height = 65 + 114 + 38 + 76 + 280 + 100 + 20  # = 693 pixels
+    enrollment_section_height = 179 if enrollment_collector is not None else 0
+    panel_height = 65 + 114 + 38 + 76 + enrollment_section_height + 280 + 100 + 20
     
     # Draw solid background panel (more opaque for better visibility)
     overlay = frame.copy()
@@ -1193,7 +1213,7 @@ def draw_dashboard(frame, frame_idx, face_count, face_distances, timestamp, audi
         if slot_idx < len(sorted_faces):
             face_idx, distance = sorted_faces[slot_idx]
             color_idx = face_idx % len(FACE_COLORS_BGR)
-            face_color = FACE_COLORS_BGR[color_idx]
+            face_color = brighten_color(FACE_COLORS_BGR[color_idx])
             cv2.circle(frame, (panel_x + 22, current_y - 6), 7, face_color, -1)
             dist_text = f"Face {face_idx}: {distance:.1f} m"
             cv2.putText(frame, dist_text, (panel_x + 40, current_y),
@@ -1206,6 +1226,173 @@ def draw_dashboard(frame, frame_idx, face_count, face_distances, timestamp, audi
                        font, text_font_scale, gray_color, text_thickness)
         current_y += line_height
     
+    # ── Enrollment section ──────────────────────────────────────────
+    if enrollment_collector is not None:
+        current_y += 10
+        cv2.line(frame,
+                 (panel_x + 10, current_y),
+                 (panel_x + panel_width - 10, current_y),
+                 (220, 220, 220), 2)
+        current_y += 20
+
+        cv2.putText(frame, "Enrollment",
+                    (panel_x + 10, current_y),
+                    font, title_font_scale, text_color, title_thickness)
+        current_y += 25
+
+        # Enrollment slot layout:
+        # [10px] [avatar 56x56] [8px gap] [label / bar] [10px]
+        avatar_dim = 56                                  # 80px * 0.7 ≈ 56
+        enroll_bar_height = 24                           # taller than before
+        enroll_label_h = 18
+        bar_x_offset = 10 + avatar_dim + 8               # = 74
+        enroll_bar_width = panel_width - bar_x_offset - 10  # narrower
+        enroll_slot_height = avatar_dim + 6               # = 62
+
+        sorted_targets = sorted(enrollment_collector.ever_seen)
+        if face_avatars is None:
+            face_avatars = {}
+        for slot_idx in range(2):
+            if slot_idx < len(sorted_targets):
+                fid = sorted_targets[slot_idx]
+                progress = enrollment_collector.get_progress(fid)
+                completed = enrollment_collector.is_completed(fid)
+                dur = enrollment_collector.get_duration(fid)
+
+                # ── Avatar (circular thumbnail) ──────────────────────
+                avatar_cx = panel_x + 10 + avatar_dim // 2
+                avatar_cy = current_y + avatar_dim // 2
+                avatar_radius = avatar_dim // 2
+
+                if fid in face_avatars:
+                    av_img = face_avatars[fid]
+                    h_orig, w_orig = av_img.shape[:2]
+                    av_h = int(avatar_dim * h_orig / w_orig)
+                    av_w = avatar_dim
+                    if av_h <= 0:
+                        av_h = avatar_dim
+                    av_resized = cv2.resize(av_img, (av_w, av_h),
+                                            interpolation=cv2.INTER_AREA)
+                    # Crop to square if needed (center crop)
+                    if av_h > avatar_dim:
+                        crop_y = (av_h - avatar_dim) // 2
+                        av_resized = av_resized[crop_y:crop_y + avatar_dim, :, :]
+                        av_h = avatar_dim
+                    elif av_h < avatar_dim:
+                        pad_top = (avatar_dim - av_h) // 2
+                        pad_bot = avatar_dim - av_h - pad_top
+                        av_resized = cv2.copyMakeBorder(
+                            av_resized, pad_top, pad_bot, 0, 0,
+                            cv2.BORDER_CONSTANT, value=(20, 20, 20))
+                        av_h = avatar_dim
+
+                    # Circular mask
+                    mask = np.zeros((avatar_dim, avatar_dim), dtype=np.uint8)
+                    cv2.circle(mask, (avatar_dim // 2, avatar_dim // 2),
+                               avatar_radius, 255, -1, cv2.LINE_AA)
+
+                    x1 = avatar_cx - avatar_radius
+                    y1 = avatar_cy - avatar_radius
+                    # Clamp to frame
+                    x1 = max(0, x1)
+                    y1 = max(0, y1)
+                    x2 = min(frame.shape[1], x1 + avatar_dim)
+                    y2 = min(frame.shape[0], y1 + avatar_dim)
+                    rw, rh = x2 - x1, y2 - y1
+
+                    roi = frame[y1:y2, x1:x2]
+                    mask_roi = mask[:rh, :rw]
+                    av_roi = av_resized[:rh, :rw]
+
+                    alpha = (mask_roi / 255.0)[:, :, np.newaxis]
+                    blended = (av_roi * alpha + roi * (1.0 - alpha)).astype(np.uint8)
+                    frame[y1:y2, x1:x2] = blended
+
+                    # Avatar border – colour indicates activity
+                    _at = active_targets if active_targets else []
+                    if fid in _at:
+                        border_color = (0, 255, 0) if len(_at) == 1 else (0, 255, 255)
+                        border_thick = 3
+                    else:
+                        border_color = (200, 200, 200)
+                        border_thick = 1
+                    cv2.circle(frame, (avatar_cx, avatar_cy),
+                               avatar_radius + 1, border_color, border_thick, cv2.LINE_AA)
+                else:
+                    # Placeholder: empty circle
+                    _at = active_targets if active_targets else []
+                    if fid in _at:
+                        ph_border = (0, 255, 0) if len(_at) == 1 else (0, 255, 255)
+                        ph_thick = 3
+                    else:
+                        ph_border = (100, 100, 100)
+                        ph_thick = 1
+                    cv2.circle(frame, (avatar_cx, avatar_cy),
+                               avatar_radius, (60, 60, 60), -1, cv2.LINE_AA)
+                    cv2.circle(frame, (avatar_cx, avatar_cy),
+                               avatar_radius + 1, ph_border, ph_thick, cv2.LINE_AA)
+                    cv2.putText(frame, "?",
+                                (avatar_cx - 6, avatar_cy + 6),
+                                font, 0.55, (100, 100, 100), 1, cv2.LINE_AA)
+
+                # ── Label text (above bar, right of avatar) ──────────
+                color_idx = fid % len(FACE_COLORS_BGR)
+                label_color = brighten_color(FACE_COLORS_BGR[color_idx])
+
+                label = f"TT{fid}: {dur:.1f}s / {enrollment_duration:.0f}s"
+                text_x = panel_x + bar_x_offset
+                # Vertically centre label+bar within avatar height
+                label_baseline = current_y + (avatar_dim // 2) - (enroll_bar_height // 2) - 3
+                cv2.putText(frame, label,
+                            (text_x, label_baseline),
+                            font, 0.50, label_color, 2, cv2.LINE_AA)
+
+                # ── Progress bar (below label, right of avatar) ──────
+                bar_y = label_baseline + 4
+                bar_x = text_x
+
+                # Background
+                cv2.rectangle(frame, (bar_x, bar_y),
+                              (bar_x + enroll_bar_width, bar_y + enroll_bar_height),
+                              (50, 50, 50), -1)
+                # Progress fill (same colour as label; green when done)
+                fill_w = int(progress * enroll_bar_width)
+                if fill_w > 0:
+                    fill_color = (0, 200, 0) if completed else label_color
+                    cv2.rectangle(frame, (bar_x, bar_y),
+                                  (bar_x + fill_w, bar_y + enroll_bar_height),
+                                  fill_color, -1)
+                # Border
+                cv2.rectangle(frame, (bar_x, bar_y),
+                              (bar_x + enroll_bar_width, bar_y + enroll_bar_height),
+                              (200, 200, 200), 1)
+            else:
+                # Empty slot placeholder (no avatar, dimmed bar)
+                avatar_cx = panel_x + 10 + avatar_dim // 2
+                avatar_cy = current_y + avatar_dim // 2
+                avatar_radius = avatar_dim // 2
+                cv2.circle(frame, (avatar_cx, avatar_cy),
+                           avatar_radius, (40, 40, 40), -1, cv2.LINE_AA)
+                cv2.circle(frame, (avatar_cx, avatar_cy),
+                           avatar_radius + 1, (70, 70, 70), 1, cv2.LINE_AA)
+
+                gray = (80, 80, 80)
+                text_x = panel_x + bar_x_offset
+                label_baseline = current_y + (avatar_dim // 2) - (enroll_bar_height // 2) - 3
+                cv2.putText(frame, "TT?: ---",
+                            (text_x, label_baseline),
+                            font, 0.45, gray, 1, cv2.LINE_AA)
+                bar_y = label_baseline + 4
+                bar_x = text_x
+                cv2.rectangle(frame, (bar_x, bar_y),
+                              (bar_x + enroll_bar_width, bar_y + enroll_bar_height),
+                              (50, 50, 50), -1)
+                cv2.rectangle(frame, (bar_x, bar_y),
+                              (bar_x + enroll_bar_width, bar_y + enroll_bar_height),
+                              (70, 70, 70), 1)
+
+            current_y += enroll_slot_height
+
     # Draw Audio section separator
     current_y += 10
     cv2.line(frame, 
@@ -1363,13 +1550,14 @@ def draw_dashboard(frame, frame_idx, face_count, face_distances, timestamp, audi
     return frame
 
 
-def draw_face_boxes(frame, face_data, timestamp):
+def draw_face_boxes(frame, face_data, timestamp, debug_mode=False):
     """
     Draw bounding boxes around detected faces
     
     Args:
         face_data: DataFrame with face position data for current timestamp
         timestamp: Current time in seconds
+        debug_mode: If True, draw face index labels (F0, F1, ...) next to faces
     """
     # Ensure frame is contiguous for OpenCV operations
     if not frame.flags['C_CONTIGUOUS']:
@@ -1388,9 +1576,9 @@ def draw_face_boxes(frame, face_data, timestamp):
     for face_idx in faces_at_time['face_idx'].unique():
         face_subset = faces_at_time[faces_at_time['face_idx'] == face_idx]
         
-        # Get color for this face
+        # Get brightened color for this face (consistent with dashboard)
         color_idx = int(face_idx) % len(FACE_COLORS_BGR)
-        color = FACE_COLORS_BGR[color_idx]
+        color = brighten_color(FACE_COLORS_BGR[color_idx])
         
         # If we have x,y coordinates, draw a marker
         if not face_subset.empty and 'x' in face_subset.columns:
@@ -1401,11 +1589,12 @@ def draw_face_boxes(frame, face_data, timestamp):
             # cv2.circle(frame, (x, y), 8, color, 2)
             # cv2.circle(frame, (x, y), 3, color, -1)
             
-            # Draw face label above marker
-            label = f"F{int(face_idx)}"
-            cv2.putText(frame, label, 
-                       (x + 70, y - 20),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            # Draw face label above marker (debug only)
+            if debug_mode:
+                label = f"F{int(face_idx)}"
+                cv2.putText(frame, label, 
+                           (x + 70, y - 20),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
     
     return frame
 
@@ -1751,7 +1940,8 @@ def copy_audio_with_ffmpeg(input_video, temp_video, final_output):
 def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_vad, output_path,
                                 show_markers=True, speaker_lookup=None, avatars=None, vvad_model_path=None,
                                 audio_vad_pad_ms=250.0, vvad_pad_ms=0.0,
-                                enrollment_duration=10.0, target_distance=2.0):
+                                enrollment_duration=10.0, target_distance=2.0,
+                                debug_mode=False):
     """
     Render annotated video with dashboard overlay and speaker avatars.
     
@@ -1851,7 +2041,10 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
 
     # Store last valid audio data to persist after MQE data ends
     last_audio_data = None
-    
+
+    # Persistent mapping face_idx → avatar image (accumulated over frames)
+    persistent_face_avatars = {}
+
     # Process each frame
     for frame_idx, frame in enumerate(tqdm(reader, total=len(df_face_count))):
         # RGB to BGR for OpenCV - ensure contiguous array
@@ -1896,7 +2089,7 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
         # Draw face position markers (if enabled and data available)
         if show_markers and not mouth_data.empty:
             # Create a temporary dataframe with position data
-            frame_bgr = draw_face_boxes(frame_bgr, mouth_data, timestamp)
+            frame_bgr = draw_face_boxes(frame_bgr, mouth_data, timestamp, debug_mode=debug_mode)
         
         # Get MQE metrics data - cumulative from start to current time
         audio_data = None
@@ -1978,9 +2171,14 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
                     'percentage': vad_percentage
                 }
         
-        # Draw dashboard overlay
-        frame_bgr = draw_dashboard(frame_bgr, frame_idx, face_count, face_distances, timestamp, audio_data, vad_data)
-        
+        # Update persistent face_idx → avatar mapping
+        if speaker_lookup and avatars and face_count > 0:
+            ts_key = round(timestamp, 6)
+            for face_idx in face_distances.keys():
+                speaker = speaker_lookup.get((ts_key, face_idx))
+                if speaker and speaker != 'unknown' and speaker in avatars:
+                    persistent_face_avatars[face_idx] = avatars[speaker]
+
         # ── Compute V-VAD decisions for ALL faces this frame ──────────────
         # Done once here so (a) the detector state advances exactly once per
         # face per frame, (b) the decision can be reused for landmark
@@ -2011,9 +2209,35 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
                         is_act, _, _ = vvad_detector.update(face_idx, mar)
                         vvad_decisions_frame[face_idx] = is_act
 
+        # ── Determine which target talkers are active this frame ─────────
+        active_targets = []
+        if enrollment_collector is not None and audio_samples is not None:
+            avad_active = bool(
+                smoothed_audio_vad[frame_idx]
+            ) if frame_idx < len(smoothed_audio_vad) else False
+
+            target_active = {}
+            for fid, dist in face_distances.items():
+                if dist <= target_distance:
+                    enrollment_collector.register_target(fid)
+                    vvad_active = vvad_decisions_frame.get(fid, False)
+                    target_active[fid] = avad_active and vvad_active
+
+            active_targets = [fid for fid, active in target_active.items()
+                              if active]
+
+        # Draw dashboard overlay
+        frame_bgr = draw_dashboard(frame_bgr, frame_idx, face_count, face_distances, timestamp,
+                                   audio_data, vad_data,
+                                   enrollment_collector=enrollment_collector,
+                                   enrollment_duration=enrollment_duration,
+                                   face_avatars=persistent_face_avatars,
+                                   active_targets=active_targets)
+
         # Draw facial landmarks for all detected faces (with V-VAD coloring)
         # Uses speaking_override to avoid double state updates on the detector.
-        if show_markers and face_count > 0:
+        # Only shown when debug_mode is enabled.
+        if debug_mode and show_markers and face_count > 0:
             for face_idx in sorted(face_distances.keys()):
                 frame_bgr = draw_facial_landmarks(
                     frame_bgr, df_mouth, timestamp, face_idx,
@@ -2023,25 +2247,6 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
 
         # ── Enrollment audio collection ────────────────────────────────────
         if enrollment_collector is not None and audio_samples is not None:
-            # Audio VAD decision for this video frame (smoothed)
-            avad_active = bool(
-                smoothed_audio_vad[frame_idx]
-            ) if frame_idx < len(smoothed_audio_vad) else False
-
-            # Identify target talkers (distance ≤ target_distance)
-            # and compute intersection: Audio VAD AND Video VAD
-            target_active = {}   # {face_idx: bool}
-            for fid, dist in face_distances.items():
-                if dist <= target_distance:
-                    enrollment_collector.register_target(fid)
-                    vvad_active = vvad_decisions_frame.get(fid, False)
-                    target_active[fid] = avad_active and vvad_active
-
-            # Overlap check: collect ONLY when exactly 1 target talker is
-            # active.  If >1 are active simultaneously → skip everyone.
-            active_targets = [fid for fid, active in target_active.items()
-                              if active]
-
             if len(active_targets) == 1:
                 fid = active_targets[0]
                 if not enrollment_collector.is_completed(fid):
@@ -2052,28 +2257,7 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
                         enrollment_collector.add_audio(
                             fid, audio_samples[s_start:s_end])
 
-        # Draw enrollment progress bars (top-left corner)
-        if enrollment_collector is not None and enrollment_collector.ever_seen:
-            frame_bgr = draw_enrollment_progress_bars(
-                frame_bgr, enrollment_collector, enrollment_duration)
-
-        # Draw speaker avatars above identified faces
-        if speaker_lookup and avatars and face_count > 0:
-            ts_key = round(timestamp, 6)
-            for face_idx in sorted(face_distances.keys()):
-                speaker = speaker_lookup.get((ts_key, face_idx))
-                if not speaker or speaker == 'unknown':
-                    continue
-                if speaker not in avatars:
-                    continue
-                face_lm = df_mouth[
-                    (df_mouth['seconds'].round(6) == ts_key) &
-                    (df_mouth['face_idx'] == face_idx)
-                ]
-                if not face_lm.empty:
-                    frame_bgr = draw_speaker_avatar(
-                        frame_bgr, avatars[speaker], face_lm
-                    )
+        # Speaker avatars are now drawn inside the dashboard Enrollment section
         
         # Convert back to RGB for imageio
         frame_rgb = frame_bgr[..., ::-1]
@@ -2208,6 +2392,7 @@ def main(args):
         vvad_pad_ms=getattr(args, 'vvad_pad_ms', 0.0),
         enrollment_duration=getattr(args, 'enrollment_duration', 10.0),
         target_distance=getattr(args, 'target_distance', 2.0),
+        debug_mode=getattr(args, 'debug_mode', False),
     )
     
     print("\n" + "="*60)
@@ -2281,6 +2466,11 @@ Output:
                        type=float, default=2.0,
                        help='Maximum distance in meters for a face to be '
                             'considered a target talker (default: 2.0)')
+    parser.add_argument('--debug-mode', dest='debug_mode',
+                       action='store_true', default=False,
+                       help='Enable debug overlays: outer mouth landmarks '
+                            'and face index labels (F0, F1, ...) on video '
+                            '(default: False)')
     parser.set_defaults(show_markers=True)
 
     args = parser.parse_args()
