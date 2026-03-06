@@ -1089,7 +1089,8 @@ def draw_pie_chart(frame, center_x, center_y, radius, data_dict, title, show_leg
 def draw_dashboard(frame, frame_idx, face_count, face_distances, timestamp,
                    audio_data=None, vad_data=None,
                    enrollment_collector=None, enrollment_duration=10.0,
-                   face_avatars=None, active_targets=None):
+                   face_avatars=None, active_targets=None,
+                   visible_targets=None):
     """
     Draw dashboard overlay on frame
     
@@ -1105,6 +1106,7 @@ def draw_dashboard(frame, frame_idx, face_count, face_distances, timestamp,
         enrollment_duration: Target enrollment duration in seconds
         face_avatars: dict face_idx -> BGR avatar image (or None)
         active_targets: list of face_idx that are active this frame (or None)
+        visible_targets: set of face_idx recently visible (current + 10 prev frames)
     """
     # Ensure frame is contiguous for OpenCV operations
     if not frame.flags['C_CONTIGUOUS']:
@@ -1124,12 +1126,21 @@ def draw_dashboard(frame, frame_idx, face_count, face_distances, timestamp,
     # Info lines (Frame, Time, Faces): 3 * 38 = 114
     # Padding + separator: 10 + 28 = 38
     # Face slots (2 faces): 2 * 38 = 76
-    # Enrollment section: 10 + separator + 20 + title(25) + 2*slot(62) = 179
+    # Enrollment section: 10 + separator + 20 + title(25) + N*slot(62)
     # Audio section: 30 (separator) + 250 (pie charts) = 280
     # VAD section: 30 (separator) + 70 (graph) = 100
     # Bottom padding: 20
     line_height = 38
-    enrollment_section_height = 179 if enrollment_collector is not None else 0
+    # Determine how many enrollment slots to show (only recently-visible targets)
+    _vis = visible_targets if visible_targets else set()
+    if enrollment_collector is not None:
+        _enroll_display = sorted(fid for fid in enrollment_collector.ever_seen if fid in _vis)
+        _n_enroll_slots = len(_enroll_display)
+    else:
+        _enroll_display = []
+        _n_enroll_slots = 0
+    enroll_slot_h = 62  # avatar_dim(56) + 6
+    enrollment_section_height = (10 + 22 + 25 + _n_enroll_slots * enroll_slot_h) if _n_enroll_slots > 0 else 0
     panel_height = 65 + 114 + 38 + 76 + enrollment_section_height + 280 + 100 + 20
     
     # Draw solid background panel (more opaque for better visibility)
@@ -1227,7 +1238,7 @@ def draw_dashboard(frame, frame_idx, face_count, face_distances, timestamp,
         current_y += line_height
     
     # ── Enrollment section ──────────────────────────────────────────
-    if enrollment_collector is not None:
+    if enrollment_collector is not None and _n_enroll_slots > 0:
         current_y += 10
         cv2.line(frame,
                  (panel_x + 10, current_y),
@@ -1249,10 +1260,10 @@ def draw_dashboard(frame, frame_idx, face_count, face_distances, timestamp,
         enroll_bar_width = panel_width - bar_x_offset - 10  # narrower
         enroll_slot_height = avatar_dim + 6               # = 62
 
-        sorted_targets = sorted(enrollment_collector.ever_seen)
+        sorted_targets = _enroll_display  # only recently-visible targets
         if face_avatars is None:
             face_avatars = {}
-        for slot_idx in range(2):
+        for slot_idx in range(len(sorted_targets)):
             if slot_idx < len(sorted_targets):
                 fid = sorted_targets[slot_idx]
                 progress = enrollment_collector.get_progress(fid)
@@ -1339,13 +1350,13 @@ def draw_dashboard(frame, frame_idx, face_count, face_distances, timestamp,
                 color_idx = fid % len(FACE_COLORS_BGR)
                 label_color = brighten_color(FACE_COLORS_BGR[color_idx])
 
-                label = f"TT{fid}: {dur:.1f}s / {enrollment_duration:.0f}s"
+                label = f"Talker{fid}: {dur:.1f}s / {enrollment_duration:.0f}s"
                 text_x = panel_x + bar_x_offset
                 # Vertically centre label+bar within avatar height
                 label_baseline = current_y + (avatar_dim // 2) - (enroll_bar_height // 2) - 3
                 cv2.putText(frame, label,
                             (text_x, label_baseline),
-                            font, 0.50, label_color, 2, cv2.LINE_AA)
+                            font, 0.52, label_color, 1, cv2.LINE_AA)
 
                 # ── Progress bar (below label, right of avatar) ──────
                 bar_y = label_baseline + 4
@@ -1366,30 +1377,6 @@ def draw_dashboard(frame, frame_idx, face_count, face_distances, timestamp,
                 cv2.rectangle(frame, (bar_x, bar_y),
                               (bar_x + enroll_bar_width, bar_y + enroll_bar_height),
                               (200, 200, 200), 1)
-            else:
-                # Empty slot placeholder (no avatar, dimmed bar)
-                avatar_cx = panel_x + 10 + avatar_dim // 2
-                avatar_cy = current_y + avatar_dim // 2
-                avatar_radius = avatar_dim // 2
-                cv2.circle(frame, (avatar_cx, avatar_cy),
-                           avatar_radius, (40, 40, 40), -1, cv2.LINE_AA)
-                cv2.circle(frame, (avatar_cx, avatar_cy),
-                           avatar_radius + 1, (70, 70, 70), 1, cv2.LINE_AA)
-
-                gray = (80, 80, 80)
-                text_x = panel_x + bar_x_offset
-                label_baseline = current_y + (avatar_dim // 2) - (enroll_bar_height // 2) - 3
-                cv2.putText(frame, "TT?: ---",
-                            (text_x, label_baseline),
-                            font, 0.45, gray, 1, cv2.LINE_AA)
-                bar_y = label_baseline + 4
-                bar_x = text_x
-                cv2.rectangle(frame, (bar_x, bar_y),
-                              (bar_x + enroll_bar_width, bar_y + enroll_bar_height),
-                              (50, 50, 50), -1)
-                cv2.rectangle(frame, (bar_x, bar_y),
-                              (bar_x + enroll_bar_width, bar_y + enroll_bar_height),
-                              (70, 70, 70), 1)
 
             current_y += enroll_slot_height
 
@@ -2045,6 +2032,11 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
     # Persistent mapping face_idx → avatar image (accumulated over frames)
     persistent_face_avatars = {}
 
+    # Rolling window of target-talker face indices visible per frame
+    # (current frame + up to 10 previous).  Used to hide enrollment
+    # slots for faces that haven't been seen recently.
+    recent_target_window = deque(maxlen=11)
+
     # Process each frame
     for frame_idx, frame in enumerate(tqdm(reader, total=len(df_face_count))):
         # RGB to BGR for OpenCV - ensure contiguous array
@@ -2226,13 +2218,22 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
             active_targets = [fid for fid, active in target_active.items()
                               if active]
 
+        # Track which target talkers are visible in this frame (within distance)
+        frame_visible_targets = set(
+            fid for fid, dist in face_distances.items() if dist <= target_distance
+        ) if enrollment_collector is not None else set()
+        recent_target_window.append(frame_visible_targets)
+        # Union of all target talkers seen in the last 11 frames (current + 10 prev)
+        visible_targets = set().union(*recent_target_window)
+
         # Draw dashboard overlay
         frame_bgr = draw_dashboard(frame_bgr, frame_idx, face_count, face_distances, timestamp,
                                    audio_data, vad_data,
                                    enrollment_collector=enrollment_collector,
                                    enrollment_duration=enrollment_duration,
                                    face_avatars=persistent_face_avatars,
-                                   active_targets=active_targets)
+                                   active_targets=active_targets,
+                                   visible_targets=visible_targets)
 
         # Draw facial landmarks for all detected faces (with V-VAD coloring)
         # Uses speaking_override to avoid double state updates on the detector.
