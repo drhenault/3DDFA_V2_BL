@@ -2037,6 +2037,9 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
 
     # Persistent mapping face_idx → avatar image (accumulated over frames)
     persistent_face_avatars = {}
+    # Majority-vote tracker: {face_idx: {speaker_name: frame_count}}
+    # Prevents avatar flickering when speaker identification is noisy.
+    face_speaker_votes = {}
 
     # Rolling window of target-talker face indices visible per frame
     # (current frame + up to 10 previous).  Used to hide enrollment
@@ -2169,13 +2172,27 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
                     'percentage': vad_percentage
                 }
         
-        # Update persistent face_idx → avatar mapping
+        # Update persistent face_idx → avatar mapping (majority-vote)
+        # Each frame casts a "vote" for the recognised speaker; the avatar
+        # always corresponds to the speaker with the most cumulative votes.
+        # This prevents flickering when identification is noisy.
         if speaker_lookup and avatars and face_count > 0:
             ts_key = round(timestamp, 6)
             for face_idx in face_distances.keys():
                 speaker = speaker_lookup.get((ts_key, face_idx))
-                if speaker and speaker != 'unknown' and speaker in avatars:
-                    persistent_face_avatars[face_idx] = avatars[speaker]
+                if speaker and speaker != 'unknown':
+                    if face_idx not in face_speaker_votes:
+                        face_speaker_votes[face_idx] = {}
+                    face_speaker_votes[face_idx][speaker] = (
+                        face_speaker_votes[face_idx].get(speaker, 0) + 1
+                    )
+                    # Pick the speaker with the highest vote count
+                    best_speaker = max(
+                        face_speaker_votes[face_idx],
+                        key=face_speaker_votes[face_idx].get,
+                    )
+                    if best_speaker in avatars:
+                        persistent_face_avatars[face_idx] = avatars[best_speaker]
 
         # ── Compute V-VAD decisions for ALL faces this frame ──────────────
         # Done once here so (a) the detector state advances exactly once per
