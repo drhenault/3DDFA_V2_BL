@@ -6,8 +6,8 @@
 
 # Set up variables (absolute paths)
 TDDFA_V2_DIRECTORY_PATH="$(pwd)/"
-VIDEO_PATH="$(pwd)/inputs/example_4.mp4"
-AUDIO_PIPELINE_DIRECTORY_PATH="/work/user_data/hboratyn/repos/leapfox/"
+VIDEO_PATH="$(pwd)/inputs/example_10.mp4"
+AUDIO_PIPELINE_DIRECTORY_PATH="/work/user_data/msulewsk/data/repos/leapFox/trunk_main188/"
 FACENET_DIRECTORY_PATH="$(pwd)/facenet/"
 
 # Obtain audio from video and save to the same directory
@@ -26,6 +26,8 @@ done
 
 # Copy the dumps obtained from the audio pipeline
 cp "$AUDIO_PIPELINE_DIRECTORY_PATH/"{vad,MQE_Metrics}".csv" dumps/
+BASENAME="$(basename "${VIDEO_PATH%.*}")"
+cp "$AUDIO_PIPELINE_DIRECTORY_PATH/${BASENAME}"*_txfeOut.wav dumps/
 
 # Obtain video information from 3DDFA_V2
 source 3ddfa-venv/bin/activate

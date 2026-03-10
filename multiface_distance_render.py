@@ -1928,7 +1928,7 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
                                 show_markers=True, speaker_lookup=None, avatars=None, vvad_model_path=None,
                                 audio_vad_pad_ms=250.0, vvad_pad_ms=0.0,
                                 enrollment_duration=10.0, target_distance=2.0,
-                                debug_mode=False):
+                                debug_mode=False, enrollment_wav_path=None):
     """
     Render annotated video with dashboard overlay and speaker avatars.
     
@@ -1953,6 +1953,9 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
         enrollment_duration: Target enrollment audio length in seconds (default 10).
         target_distance: Maximum distance (meters) for a face to be considered
                          a target talker (default 2.0).
+        enrollment_wav_path: Path to WAV file used as source audio for enrollment
+                             (e.g. the *_txfeOut.wav from dumps/). If None,
+                             enrollment audio collection is disabled.
     """
     print(f"\nReading video: {video_path}")
     reader = imageio.get_reader(video_path)
@@ -1997,8 +2000,8 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
     enrollment_collector = None
     smoothed_audio_vad = None
 
-    wav_path = Path(video_path).with_suffix('.wav')
-    if sf is not None and wav_path.exists():
+    wav_path = Path(enrollment_wav_path) if enrollment_wav_path else None
+    if sf is not None and wav_path is not None and wav_path.exists():
         audio_samples, audio_sr = sf.read(str(wav_path), dtype='float32')
         if audio_samples.ndim > 1:
             audio_samples = audio_samples[:, 0]  # mono
@@ -2024,7 +2027,10 @@ def render_video_with_dashboard(video_path, df_face_count, df_mouth, df_mqe, df_
     elif sf is None:
         print(f"  ⚠ 'soundfile' module not installed; enrollment audio disabled")
     else:
-        print(f"  ⚠ Source WAV not found ({wav_path.name}); enrollment audio disabled")
+        if wav_path is not None:
+            print(f"  ⚠ Enrollment WAV not found ({wav_path}); enrollment audio disabled")
+        else:
+            print(f"  ⚠ No enrollment WAV path provided; enrollment audio disabled")
 
     # Store last valid audio data to persist after MQE data ends
     last_audio_data = None
@@ -2354,6 +2360,16 @@ def main(args):
     else:
         print(f"  No avatar images loaded from {avatars_dir}")
 
+    # Locate enrollment WAV (*_txfeOut.wav) in dumps directory
+    enrollment_wav_path = None
+    video_stem = video_path.stem  # e.g. "example_6"
+    txfe_candidates = sorted(dumps_dir.glob(f"{video_stem}*_txfeOut.wav"))
+    if txfe_candidates:
+        enrollment_wav_path = txfe_candidates[0]
+        print(f"  Enrollment WAV: {enrollment_wav_path}")
+    else:
+        print(f"  No *_txfeOut.wav found in {dumps_dir} for '{video_stem}' (enrollment audio disabled)")
+
     # Optionally assign stable track IDs from face recognition embeddings
     if getattr(args, 'embeddings', None):
         emb_path = Path(args.embeddings)
@@ -2394,6 +2410,7 @@ def main(args):
         enrollment_duration=getattr(args, 'enrollment_duration', 10.0),
         target_distance=getattr(args, 'target_distance', 2.0),
         debug_mode=getattr(args, 'debug_mode', False),
+        enrollment_wav_path=enrollment_wav_path,
     )
     
     print("\n" + "="*60)
