@@ -6,7 +6,7 @@
 
 # Set up variables (absolute paths)
 TDDFA_V2_DIRECTORY_PATH="$(pwd)/"
-VIDEO_PATH="$(pwd)/inputs/example_10.mp4"
+VIDEO_PATH="$(pwd)/inputs/example_3.mp4"
 AUDIO_PIPELINE_DIRECTORY_PATH="/work/user_data/msulewsk/data/repos/leapFox/trunk_main188/"
 FACENET_DIRECTORY_PATH="$(pwd)/facenet/"
 
@@ -40,7 +40,6 @@ source facenet-venv/bin/activate
 ./run_identify_speakers.sh models/20180402-114759 "$VIDEO_PATH" "$TDDFA_V2_DIRECTORY_PATH/enrollment-avatars/" --threshold 0.5 -o "$TDDFA_V2_DIRECTORY_PATH/dumps/speaker_identification.csv" -m "$TDDFA_V2_DIRECTORY_PATH/dumps/mouth_position.csv"
 deactivate
 
-
 # Render the video with all the information
 cd "$TDDFA_V2_DIRECTORY_PATH"
 source 3ddfa-venv/bin/activate
@@ -51,6 +50,8 @@ python3 extract_face_embeddings.py -i "$VIDEO_PATH" --dumps_dir dumps -o face_em
 python3 reindex_face_ids.py --dumps_dir dumps --embeddings face_embeddings.npz
 
 OUTPUT_NAME="outputs/$(basename "${VIDEO_PATH%.*}")_output.${VIDEO_PATH##*.}"
+DEBUG_OUTPUT_NAME="outputs/$(basename "${VIDEO_PATH%.*}")_output_debug.${VIDEO_PATH##*.}"
 python3 multiface_distance_render.py -i "$VIDEO_PATH" -o "$OUTPUT_NAME" --dumps_dir dumps --vvad_model=vvad_dnn_model.pt
+# python3 multiface_distance_render.py -i "$VIDEO_PATH" -o "$DEBUG_OUTPUT_NAME" --dumps_dir dumps --vvad_model=vvad_dnn_model.pt --debug-mode
 deactivate
 echo "Done!"
