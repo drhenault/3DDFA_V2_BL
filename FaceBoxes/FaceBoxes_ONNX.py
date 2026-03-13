@@ -49,7 +49,11 @@ class FaceBoxes_ONNX(object):
     def __init__(self, timer_flag=False):
         if not osp.exists(onnx_path):
             convert_to_onnx(onnx_path)
-        self.session = onnxruntime.InferenceSession(onnx_path, None)
+
+        sess_options = onnxruntime.SessionOptions()
+        sess_options.intra_op_num_threads = os.getenv("TDDFA_INTRA_NUM_THREADS", 4)
+        sess_options.inter_op_num_threads = os.getenv("TDDFA_INTER_NUM_THREADS", 1)
+        self.session = onnxruntime.InferenceSession(onnx_path, sess_options)
 
         self.timer_flag = timer_flag
 

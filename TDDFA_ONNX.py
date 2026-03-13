@@ -25,6 +25,10 @@ class TDDFA_ONNX(object):
     def __init__(self, **kvs):
         # torch.set_grad_enabled(False)
 
+        sess_options = onnxruntime.SessionOptions()
+        sess_options.intra_op_num_threads = os.getenv("TDDFA_INTRA_NUM_THREADS", 4)
+        sess_options.inter_op_num_threads = os.getenv("TDDFA_INTER_NUM_THREADS", 1)
+
         # load onnx version of BFM
         bfm_fp = kvs.get('bfm_fp', make_abs_path('configs/bfm_noneck_v3.pkl'))
         bfm_onnx_fp = bfm_fp.replace('.pkl', '.onnx')
@@ -34,7 +38,7 @@ class TDDFA_ONNX(object):
                 shape_dim=kvs.get('shape_dim', 40),
                 exp_dim=kvs.get('exp_dim', 10)
             )
-        self.bfm_session = onnxruntime.InferenceSession(bfm_onnx_fp, None)
+        self.bfm_session = onnxruntime.InferenceSession(bfm_onnx_fp, sess_options)
 
         # load for optimization
         bfm = BFMModel(bfm_fp, shape_dim=kvs.get('shape_dim', 40), exp_dim=kvs.get('exp_dim', 10))
@@ -57,7 +61,7 @@ class TDDFA_ONNX(object):
             print(f'{onnx_fp} does not exist, try to convert the `.pth` version to `.onnx` online')
             onnx_fp = convert_to_onnx(**kvs)
 
-        self.session = onnxruntime.InferenceSession(onnx_fp, None)
+        self.session = onnxruntime.InferenceSession(onnx_fp, sess_options)
 
         # params normalization config
         r = _load(param_mean_std_fp)
